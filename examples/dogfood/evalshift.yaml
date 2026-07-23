@@ -1,0 +1,31 @@
+# Fixture project used by .github/workflows/dogfood.yml to exercise this
+# action end to end against hosted EvalShift.
+#
+# Kept deliberately small (4 examples, one length evaluator) because every
+# dogfood run spends real model credits.
+
+version: 1
+prompts:
+  - id: greet
+    detection: python_string
+    path: prompts.py
+    variable: GREET_PROMPT
+    variables: [name, tone]
+
+defaults:
+  source_model: gemini-2.5-flash
+  target_model: gemini-2.5-pro
+  concurrency: 4
+  cache: true
+
+evaluators:
+  structural:
+    - type: length
+      min_chars: 5
+      max_chars: 200
+
+slices:
+  - name: formal
+    filter: formal
+  - name: casual
+    filter: casual

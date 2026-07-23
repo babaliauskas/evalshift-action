@@ -1,0 +1,93 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+      - name: Test
+        run: uv run pytest
+      - name: Lint
+        run: uv run ruff check .
+      - name: Dependency audit
+        run: uv run pip-audit
+
+  cli-contract:
+    # The unit tests fake the CLI, so nothing else notices when a new
+    # EvalShift release renames a flag the action shells out to. This job
+    # installs the exact pinned version and asserts the command surface is
+    # still there. No API keys, no model credits.
+    runs-on: ubuntu-latest
+    env:
+      COLUMNS: "200"
+      # rich colorizes help on CI runners and styles the two leading dashes
+      # as separate spans, so a literal "--yes" never appears in the bytes.
+      # Ask for plain output, and strip any escapes that survive anyway.
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read pinned versions from action.yml
+        id: pins
+        run: |
+          set -euo pipefail
+          read_default() {
+            awk -v key="  $1:" '
+              $0 == key { found = 1; next }
+              found && /default:/ { gsub(/["[:space:]]/, "", $2); print $2; exit }
+            ' action.yml
+          }
+          cli="$(read_default evalshift-version)"
+          python="$(read_default python-version)"
+          test -n "$cli" || { echo "::error::could not read evalshift-version from action.yml"; exit 1; }
+          test -n "$python" || { echo "::error::could not read python-version from action.yml"; exit 1; }
+          echo "cli=$cli" >> "$GITHUB_OUTPUT"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.pins.outputs.python }}
+
+      - name: Install the pinned EvalShift CLI
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "evalshift==${{ steps.pins.outputs.cli }}"
+
+      - name: Assert the command surface the action depends on
+        run: |
+          set -euo pipefail
+          echo "installed: $(evalshift --version 2>&1)"
+
+          check() {
+            local subcommand="$1"
+            shift
+            local help missing=()
+            local esc
+            esc="$(printf '\033')"
+            # Capture stderr too: rich renders help to whichever stream it
+            # picks, and a silently empty capture would look like a rename.
+            help="$(evalshift "$subcommand" --help 2>&1 | sed -E "s/${esc}\[[0-9;]*m//g")"
+            for flag in "$@"; do
+              grep -q -- "$flag" <<<"$help" || missing+=("$flag")
+            done
+            if (( ${#missing[@]} > 0 )); then
+              echo "::error::'evalshift $subcommand' no longer accepts: ${missing[*]} — scripts/evalshift_action.py will break"
+              echo "--- captured 'evalshift $subcommand --help' output ---"
+              printf '%s\n' "$help"
+              echo "--- end ---"
+              return 1
+            fi
+            echo "evalshift $subcommand: $* all present"
+          }
+
+          check all --yes --config --suite
+          check push --no-create-project --config --suite

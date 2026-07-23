@@ -1,0 +1,73 @@
+name: dogfood
+
+# Exercises this action end to end against hosted EvalShift using the
+# fixture project in examples/dogfood.
+#
+# Every run spends real model credits, so this is manual only. Routine
+# drift in the CLI command surface is covered for free by the
+# cli-contract job in ci.yml; run this when you want to verify the whole
+# path end to end, including the hosted API contract.
+#
+# Gating is `never`: this workflow verifies action wiring (install, run,
+# push, diff lookup, outputs), not model quality, so a genuine regression
+# in the fixture suite must not red this repo.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+jobs:
+  dogfood:
+    runs-on: ubuntu-latest
+    env:
+      EVALSHIFT_NONINTERACTIVE: "1"
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      HAS_SECRETS: ${{ secrets.EVALSHIFT_TOKEN != '' && secrets.GEMINI_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Report missing secrets
+        if: env.HAS_SECRETS != 'true'
+        run: |
+          echo "::warning::EVALSHIFT_TOKEN and/or GEMINI_API_KEY not configured; skipping dogfood run."
+
+      - name: Run EvalShift action
+        id: evalshift
+        if: env.HAS_SECRETS == 'true'
+        uses: ./
+        with:
+          token: ${{ secrets.EVALSHIFT_TOKEN }}
+          config: examples/dogfood/evalshift.yaml
+          suite: examples/dogfood/golden.jsonl
+          fail-on: never
+          comment: "false"
+
+      - name: Assert outputs
+        if: env.HAS_SECRETS == 'true'
+        env:
+          RUN_ID: ${{ steps.evalshift.outputs.run_id }}
+          RUN_URL: ${{ steps.evalshift.outputs.run_url }}
+          CONCLUSION: ${{ steps.evalshift.outputs.conclusion }}
+          REGRESSION_COUNT: ${{ steps.evalshift.outputs.regression_count }}
+          DIFF_URL: ${{ steps.evalshift.outputs.diff_url }}
+        run: |
+          set -euo pipefail
+          test -n "$RUN_ID" || { echo "::error::run_id output was empty"; exit 1; }
+          case "$RUN_URL" in
+            https://*) ;;
+            *) echo "::error::run_url was not an https URL: $RUN_URL"; exit 1 ;;
+          esac
+          case "$CONCLUSION" in
+            success|failure) ;;
+            *) echo "::error::unexpected conclusion: $CONCLUSION"; exit 1 ;;
+          esac
+          echo "run_id=$RUN_ID"
+          echo "run_url=$RUN_URL"
+          echo "conclusion=$CONCLUSION"
+          echo "regression_count=$REGRESSION_COUNT"
+          echo "diff_url=${DIFF_URL:-<none>}"
