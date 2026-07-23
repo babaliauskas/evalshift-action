@@ -1,0 +1,402 @@
+# evalshift-action (GitHub Action) — complete reference for AI tools
+
+Canonical hosted copy: https://evalshift.dev/ci-llms-full.txt
+Repo/action ref: babaliauskas/evalshift-action | version: 0.1.0 | license: MIT
+Kind: composite GitHub Action (not JavaScript, not Docker)
+Marketplace name: "EvalShift" | branding: bar-chart-2 / purple
+Runtime helper: scripts/evalshift_action.py (stdlib only, no third-party deps)
+
+Purpose: run an EvalShift golden suite inside CI, push the completed run to hosted EvalShift,
+ask the hosted API for a compatible baseline run on the base branch, fetch the hosted diff,
+write action outputs, keep exactly one PR comment up to date, set the `evalshift/regression`
+commit status, and exit non-zero when the diff is a regression under the selected `fail-on`
+mode. The action is a thin CI wrapper: all evaluation, statistics, and reporting happen in the
+EvalShift CLI it installs; all diffing happens server-side in hosted EvalShift.
+
+Related packages (separate repos, separate docs):
+- evalshift (PyPI, the CLI this action installs and shells out to) — https://evalshift.dev/cli-llms-full.txt
+- evalshift-sdk (PyPI, in-process capture SDK) — https://evalshift.dev/sdk-llms-full.txt
+
+Minimal usage:
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+jobs:
+  evalshift:
+    runs-on: ubuntu-latest
+    env:
+      EVALSHIFT_NONINTERACTIVE: "1"
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: babaliauskas/evalshift-action@v0
+        with:
+          token: ${{ secrets.EVALSHIFT_TOKEN }}
+          fail-on: regression
+```
+
+Prerequisites in the repository, all of them hard requirements:
+1. `evalshift.yaml` committed (or `config:` pointed at wherever it lives).
+2. A golden JSONL suite committed (or `suite:` pointed at it).
+3. Repository secret `EVALSHIFT_TOKEN` (an `es_...` hosted token).
+4. A model provider key in the job env matching the models named in `evalshift.yaml`.
+Every run makes real model calls and spends real credits. Cost per run ≈ suite size × 2 models
+(source + target) × prompts, minus CLI cache hits (the runner starts with a cold cache, so in
+practice assume no cache reuse across CI runs).
+
+## Execution model
+
+Composite `runs.steps`, in order:
+1. `actions/setup-python@v7` with `python-version` (default `3.14`).
+2. `python -m pip install --upgrade pip` then `python -m pip install "evalshift==<evalshift-version>"`.
+   No pip caching; expect ~20-60s of install per run.
+3. `python "$GITHUB_ACTION_PATH/scripts/evalshift_action.py"` with `id: run`, all inputs passed
+   as `INPUT_*` env vars. (Composite actions do NOT auto-populate `INPUT_*` for `run:` steps,
+   so action.yml maps every input explicitly — an input added to `inputs:` without a matching
+   `env:` entry is invisible to the helper.)
+
+The helper's process CWD is the workspace root (`Path.cwd()`), so `config` / `suite` paths and
+the `.evalshift/` output directory are all relative to the repository root by default.
+
+The helper never streams: `run_command` uses `subprocess.run(capture_output=True)` and prints
+stdout/stderr only after each CLI command finishes. A long `evalshift all` looks silent in the
+log until it completes.
+
+## Inputs (action.yml)
+
+| Input | Required | Default | Meaning |
+|---|---|---|---|
+| token | yes | — | Hosted EvalShift API token (`es_...`). Masked via `::add-mask::`, and redacted from CLI output. Passed to the CLI as env `EVALSHIFT_TOKEN`, never in argv. |
+| host | no | https://api.evalshift.dev | Hosted API base URL. Trailing `/` stripped. Passed as env `EVALSHIFT_HOST`. Set only for self-hosted/staging. |
+| config | no | evalshift.yaml | Path to config, relative to workspace root. Paths *inside* the config resolve relative to the config file's own directory (CLI behavior), so a config in a subdirectory works unchanged. |
+| suite | no | golden.jsonl | Path to golden JSONL suite, relative to workspace root. |
+| evalshift-version | no | 0.8.0 | Exact CLI version installed from PyPI. Pinned for reproducibility. |
+| python-version | no | 3.14 | Python for the CLI. Must satisfy the CLI's `requires-python` (>=3.14 for 0.8.0); lowering it breaks install. |
+| fail-on | no | regression | `never` \| `regression` \| `any-slice-regression`. Any other value → hard error before any work. |
+| branch | no | "" (auto) | Candidate branch recorded on the hosted run. Auto-detected; override only for non-standard naming. |
+| base-branch | no | "" (auto) | Branch searched for a baseline run. Auto-detected. If it resolves empty, no baseline lookup happens at all and the check passes. |
+| create-project | no | true | When false, appends `--no-create-project` to `evalshift push`, making a missing hosted project a hard failure. |
+| comment | no | true | Whether to upsert the PR comment. Commit status is set regardless. |
+| github-token | no | `${{ github.token }}` | Token for the PR comment and commit status. Also masked. If empty, both comment and status are skipped entirely. |
+
+Boolean inputs are truthy for `1`, `true`, `yes`, `on` (case-insensitive); everything else is
+false. All inputs are `.strip()`ed.
+
+## Outputs
+
+| Output | Value |
+|---|---|
+| run_url | Hosted run URL, parsed as the last http(s) line of `evalshift push` stdout. Empty is impossible — a push that prints no URL is a hard error. |
+| diff_url | Hosted `web_diff_url` for the baseline comparison; empty string when no compatible baseline. |
+| run_id | Local/hosted run id (e.g. `r_20260723_myssuite_ab12cd`). |
+| regression_count | `aggregate_delta.regressions` from the hosted diff; `0` when no baseline. |
+| conclusion | `success` or `failure`, after applying `fail-on`. |
+
+Written by appending `key=value` lines to `$GITHUB_OUTPUT`. Values are single-line by
+construction; there is no heredoc delimiter handling, so a hypothetical multi-line value would
+corrupt the output file.
+
+## Commands the action shells out to
+
+```
+evalshift all  --yes --config <config> --suite <suite>
+evalshift push <run_id> --config <config> --suite <suite> [--no-create-project]
+```
+Both inherit the job environment plus `EVALSHIFT_HOST` and `EVALSHIFT_TOKEN`. A non-zero exit
+from either raises `ActionError` and fails the step (message: `command failed (<rc>): <cmd>`).
+
+`run_id` is NOT parsed from CLI output. It is the directory under `<cwd>/.evalshift/runs` with
+the newest mtime. Consequences: a pre-existing `.evalshift/runs` in the checkout is harmless
+(the fresh run is newest), but any step that touches an older run directory between `all` and
+the run-id read can select the wrong run. Missing directory → `run directory ... does not
+exist`; empty directory → `no local EvalShift runs found in ...`.
+
+`run_url` extraction scans `push` stdout bottom-up for the first non-empty line starting with
+`http://` or `https://`. A CLI release that stops printing a bare URL as the last line breaks
+this (guarded by the `cli-contract` CI job, which only checks flags, not output shape).
+
+## Hosted API contract used
+
+Auth on both calls: `Authorization: Bearer <token>`, `Accept: application/json`, 30s timeout,
+stdlib `urllib`.
+
+1. `GET {host}/runs/{run_id}/baseline-compatible?branch={base_branch}`
+   Response (object required, else hard error):
+   ```json
+   {
+     "baseline_run": {"id": "..."} | null,
+     "compatibility": "direct",
+     "api_diff_url": "/runs/<base>/diff/<candidate>",
+     "web_diff_url": "https://app.evalshift.dev/..."
+   }
+   ```
+   Skipped entirely when `base_branch` is empty.
+2. `GET api_diff_url` (absolute URLs used as-is; relative joined onto `host`). Only called when
+   `api_diff_url` is truthy. Response fields the action reads:
+   ```json
+   {
+     "aggregate_delta": {"regressions": <int>, "pass_rate_delta": <float, -1..1>},
+     "per_slice_deltas": [{"slice": "<name>", "pass_rate_delta": <float>}]
+   }
+   ```
+   Any other key is ignored. Non-object response → hard error.
+
+`target_url` for the commit status = `web_diff_url` when present, else `run_url`.
+
+## Gating algorithm (exact)
+
+```
+diff is None                      -> conclusion=success, should_fail=False, regression_count=0
+regression_count = int(aggregate_delta.regressions or 0)
+slice_regressions = [s for s in per_slice_deltas if float(s.pass_rate_delta) < 0]
+                    sorted ascending by pass_rate_delta   # most negative first
+top_slice_regressions = slice_regressions[:5]             # comment display only
+
+fail_on == "never"                -> should_fail = False
+fail_on == "regression"           -> should_fail = regression_count > 0
+fail_on == "any-slice-regression" -> should_fail = len(slice_regressions) > 0
+conclusion = "failure" if should_fail else "success"
+```
+Non-numeric / missing deltas coerce to `0.0`, so a malformed slice entry is treated as "flat",
+never as a regression. `any-slice-regression` is strictly not a superset of `regression`: a run
+with `regressions > 0` but no negative slice delta fails under `regression` and passes under
+`any-slice-regression`.
+
+Process exit code: `1` when `should_fail`, `1` on any `ActionError` (printed as `error: <msg>`
+to stderr), else `0`.
+
+## GitHub context detection
+
+```
+event_name       = GITHUB_EVENT_NAME
+repository       = GITHUB_REPOSITORY
+event            = JSON at GITHUB_EVENT_PATH (unreadable/invalid -> {})
+is_pull_request  = event_name.startswith("pull_request")   # includes pull_request_target
+pull_number      = event.number if int else None
+sha              = event.pull_request.head.sha or GITHUB_SHA
+branch           = input.branch or event.pull_request.head.ref or GITHUB_HEAD_REF or GITHUB_REF_NAME
+base_branch      = input.base-branch or event.pull_request.base.ref or GITHUB_BASE_REF or GITHUB_REF_NAME
+```
+On a `push` event, `base_branch` falls back to the pushed branch itself — a push to `main`
+therefore diffs against the previous `main` run, which is the intended "track the trunk"
+behavior, not a bug.
+
+## PR comment
+
+Marker: `<!-- evalshift:comment -->` (first line of the body). Upsert logic:
+- Skipped unless `comment: true`, `is_pull_request`, and `pull_number is not None`.
+- `GET /repos/{repo}/issues/{pull_number}/comments`, then the FIRST comment whose author
+  `user.type == "Bot"` AND whose body contains the marker is PATCHed; otherwise a new comment
+  is POSTed. A human-authored comment containing the marker is deliberately never edited.
+- Pagination is not handled: only the first page of comments is inspected. On a PR with enough
+  comments to push the EvalShift comment off page 1, a duplicate is created.
+- The marker is a constant, so two invocations of this action on the same PR fight over one
+  comment. Run at most one invocation with `comment: true` per PR.
+- HTTP 403/404 → `warning: could not upsert PR comment: HTTP <code>` on stderr and continue.
+  Any other HTTP error propagates and fails the step.
+
+Body shape (no baseline):
+```
+<!-- evalshift:comment -->
+## EvalShift regression check
+
+**Conclusion:** `success`
+**Hosted run:** [open run](<run_url>)
+**Regressions:** 0
+
+No compatible baseline run was found on the base branch.
+```
+Body shape (with baseline) replaces the trailing line with a `**Diff:**` link (when
+`web_diff_url` exists), a `**Pass-rate movement:**` line, and a two-column table of up to five
+regressed slices, or the single row `| No regressed slices | 0 pts |`. Percent formatting is
+`round(value * 100)` with a `+` prefix only when positive, suffixed ` pts` — e.g. `-20 pts`,
+`+5 pts`, `0 pts`. Rounding is display-only; gating uses raw floats.
+
+## Commit status
+
+`POST /repos/{repo}/statuses/{sha}` with:
+- `context`: `evalshift/regression` (constant — parallel invocations overwrite each other)
+- `state`: `success` | `failure` (mirrors `conclusion`)
+- `target_url`: `web_diff_url` or `run_url`
+- `description`: `EvalShift <conclusion>: <n> regression(s)`, truncated to 140 chars
+Set on every event where `github-token` is non-empty, including `push`. 403/404 → warning
+`warning: could not set commit status: HTTP <code>` and continue; other HTTP errors fail.
+
+## Secrets handling
+
+- `mask_secret` prints `::add-mask::<value>` for `token` and `github-token` before any other work.
+- `redact_text` replaces every env value whose KEY (uppercased) contains `TOKEN` or `SECRET`, or
+  ends with `API_KEY`, with `<redacted>` in printed CLI stdout/stderr. Values shorter than 4
+  chars are skipped. Redaction applies to what is PRINTED; `CommandResult.stdout` retains the
+  raw text for URL parsing.
+- Token and host reach the CLI only through env, never argv (asserted in tests).
+- Provider API keys are the caller's responsibility: the action passes the job environment
+  through unchanged and never sets, reads, or forwards them to the hosted API.
+
+## GitHub permissions
+
+| Permission | Needed for |
+|---|---|
+| contents: read | `actions/checkout` |
+| pull-requests: write | PR comment |
+| issues: write | PR comments are issue comments in the REST API |
+| statuses: write | `evalshift/regression` commit status |
+
+Only `contents: read` is strictly required. Missing comment/status permissions degrade to
+stderr warnings; the gate still fails the job correctly.
+
+## Provider key matrix
+
+| Provider | Env var |
+|---|---|
+| Anthropic | ANTHROPIC_API_KEY |
+| OpenAI | OPENAI_API_KEY |
+| Google | GEMINI_API_KEY or GOOGLE_API_KEY |
+
+Which key is required follows from `defaults.source_model` / `defaults.target_model` in
+`evalshift.yaml`. A cross-provider migration needs both keys. `EVALSHIFT_NONINTERACTIVE: "1"`
+is recommended in the job env: `evalshift all --yes` already skips the >$10 confirmation, but
+the env var covers any other prompt a CLI release adds.
+
+## Behavior rules (invariants)
+
+- Missing `token` → `input 'token' is required`, exit 1. Validation happens in the helper, i.e.
+  AFTER the composite has already installed Python and the CLI — a misconfigured workflow still
+  burns install time, but never model credits.
+- Invalid `fail-on` → `input 'fail-on' must be one of: never, regression, any-slice-regression`.
+- No baseline (empty `base_branch`, null `api_diff_url`, or first run on a branch) → check
+  passes, `regression_count=0`, `diff_url=""`, comment says so explicitly. First PR against a
+  repo with no history therefore always goes green.
+- The action never uploads report artifacts to GitHub. `report.html` and all run artifacts stay
+  in the workspace at `.evalshift/runs/<run-id>/`; add your own `actions/upload-artifact` step
+  if you want them retained.
+- The action never writes to the repository and never pushes commits.
+- Outputs are written before the comment/status calls, so a permissions failure still leaves
+  outputs consumable by later steps.
+- `evalshift push` is idempotent on run id (CLI behavior); a re-run of the job creates a new
+  run id, not a duplicate push.
+- The helper has zero third-party dependencies; `pyproject.toml` declares `dependencies = []`
+  and dev-only `pytest` / `ruff` / `pip-audit`.
+- `requires-python = ">=3.12"` for the helper itself; the `python-version` input governs the
+  CLI, which is stricter (>=3.14).
+
+## Repo CI (what guards this action)
+
+- `.github/workflows/ci.yml` job `test`: `uv run pytest`, `ruff check .`, `pip-audit`.
+- `.github/workflows/ci.yml` job `cli-contract`: reads `evalshift-version` and `python-version`
+  defaults straight out of `action.yml` via awk, installs that exact CLI, strips ANSI, and
+  asserts `evalshift all --help` still offers `--yes --config --suite` and `evalshift push
+  --help` still offers `--no-create-project --config --suite`. Free — no API keys, no credits.
+  This is the drift alarm for CLI flag renames.
+- `.github/workflows/dogfood.yml`: `workflow_dispatch` only (spends real credits), runs the
+  action against `examples/dogfood/` with `fail-on: never`, `comment: "false"`, then asserts
+  `run_id` non-empty, `run_url` starts with `https://`, `conclusion` ∈ {success, failure}.
+  Warns and skips when `EVALSHIFT_TOKEN` / `GEMINI_API_KEY` secrets are absent.
+
+## Fixture project (examples/dogfood/)
+
+```yaml
+# examples/dogfood/evalshift.yaml — deliberately tiny (4 examples, one evaluator)
+version: 1
+prompts:
+  - id: greet
+    detection: python_string
+    path: prompts.py
+    variable: GREET_PROMPT
+    variables: [name, tone]
+defaults:
+  source_model: gemini-2.5-flash
+  target_model: gemini-2.5-pro
+  concurrency: 4
+  cache: true
+evaluators:
+  structural:
+    - type: length
+      min_chars: 5
+      max_chars: 200
+slices:
+  - name: formal
+    filter: formal
+  - name: casual
+    filter: casual
+```
+```jsonl
+{"id": "ex01", "inputs": {"name": "Alex", "tone": "formal"}, "tags": ["formal"]}
+{"id": "ex02", "inputs": {"name": "Sam", "tone": "casual"}, "tags": ["casual"]}
+```
+
+## Recipes
+
+Config in a subdirectory:
+```yaml
+      - uses: babaliauskas/evalshift-action@v0
+        with:
+          token: ${{ secrets.EVALSHIFT_TOKEN }}
+          config: eval/evalshift.yaml
+          suite: eval/golden.jsonl
+```
+
+Consume outputs downstream:
+```yaml
+      - uses: babaliauskas/evalshift-action@v0
+        id: evalshift
+        with:
+          token: ${{ secrets.EVALSHIFT_TOKEN }}
+      - run: echo "diff ${{ steps.evalshift.outputs.diff_url }} (${{ steps.evalshift.outputs.regression_count }} regressions)"
+```
+
+Report only, never block (calibration phase):
+```yaml
+        with:
+          token: ${{ secrets.EVALSHIFT_TOKEN }}
+          fail-on: never
+```
+
+Multiple suites in one repo — give each its own job and disable the comment on all but one, or
+the constant marker and constant status context make them overwrite each other:
+```yaml
+      - uses: babaliauskas/evalshift-action@v0
+        with:
+          token: ${{ secrets.EVALSHIFT_TOKEN }}
+          suite: eval/golden-agent.jsonl
+          comment: "false"
+```
+
+Only run when the suite or prompts changed (cost control):
+```yaml
+on:
+  pull_request:
+    paths: ["eval/**", "app/prompts/**", "evalshift.yaml"]
+```
+
+## Troubleshooting checklist
+
+`input 'token' is required` → the `token:` input is unset or an empty secret; secrets are not
+available to workflows triggered by `pull_request` from a fork.
+`command failed (1): evalshift all ...` → a CLI-level failure (bad config, missing provider key,
+model error). The CLI's own stderr is printed directly above, redacted.
+`no local EvalShift runs found in .../.evalshift/runs` → `evalshift all` exited 0 without
+writing a run; almost always a config pointing at a different `--runs-base` or a CWD mismatch.
+`evalshift push did not print a hosted run URL` → CLI output shape changed, or push succeeded
+silently; re-run `evalshift push <run-id>` locally to see what it prints.
+HTTP 401/403 from the hosted API → bad or expired `EVALSHIFT_TOKEN`, wrong `host`, or a
+project-scoped token combined with `create-project: true` on a project that does not exist yet.
+`warning: could not upsert PR comment: HTTP 403` → missing `pull-requests: write` /
+`issues: write`, or a fork PR with a read-only `GITHUB_TOKEN`. Gate still works.
+Check always green → no compatible baseline on the base branch yet (expected on the first PR),
+or `fail-on: never`, or `base-branch` resolved empty.
+Two comments on one PR → two action invocations, or the marker comment fell off page 1 of the
+comments API.
+Job is silent for minutes → output is captured and printed per command, not streamed.
+Install fails on `evalshift==0.8.0` → `python-version` below the CLI's `requires-python` (3.14).
+Costs higher than expected → the runner has a cold CLI cache every run; narrow the trigger with
+`on.pull_request.paths`, or shrink the suite.
+
+## Versioning
+
+`@v0` tracks the latest v0.x. `@v0.1.0` pins exactly. `evalshift-version` pins the CLI
+independently of the action tag — pin both for a fully reproducible workflow.
+License: MIT (the EvalShift CLI it installs is licensed separately, AGPL-3.0-or-later).

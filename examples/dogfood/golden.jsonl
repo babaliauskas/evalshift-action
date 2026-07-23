@@ -1,0 +1,4 @@
+{"id": "ex01", "inputs": {"name": "Alex", "tone": "formal"}, "tags": ["formal"]}
+{"id": "ex02", "inputs": {"name": "Sam", "tone": "casual"}, "tags": ["casual"]}
+{"id": "ex03", "inputs": {"name": "Jamie", "tone": "formal"}, "tags": ["formal"]}
+{"id": "ex04", "inputs": {"name": "Riley", "tone": "casual"}, "tags": ["casual"]}
