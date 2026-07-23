@@ -53,7 +53,7 @@ def test_script_default_version_matches_action_manifest() -> None:
 def test_action_config_defaults_to_current_evalshift_release() -> None:
     config = action.ActionConfig.from_env({"INPUT_TOKEN": "es_secret"})
 
-    assert config.evalshift_version == "0.8.0"
+    assert config.evalshift_version == "0.9.0"
 
 
 def test_detect_context_uses_pull_request_event_payload(tmp_path: Path) -> None:

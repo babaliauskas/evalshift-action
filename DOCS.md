@@ -7,7 +7,7 @@ it to the latest run on your base branch, and fails the check when the diff show
 - **Action ref:** `babaliauskas/evalshift-action@v0` · **version:** 0.1.0 · **License:** MIT
 - **Kind:** composite action — installs Python + the pinned EvalShift CLI, then runs a small
   stdlib-only helper script. Nothing is compiled, nothing is containerised.
-- **Pinned CLI:** `evalshift==0.8.0` by default, overridable.
+- **Pinned CLI:** `evalshift==0.9.0` by default, overridable.
 - **What it adds on top of the CLI:** hosted push, baseline lookup, cross-branch diff, one
   self-updating PR comment, a commit status, and an exit code.
 
@@ -147,8 +147,8 @@ means a hung job.
 | `host` | no | `https://api.evalshift.dev` | Hosted API base URL. Set only for a self-hosted or staging deployment. |
 | `config` | no | `evalshift.yaml` | Path to your config, relative to the repository root. Paths *inside* the config (prompt files, tools) resolve relative to the config file's own directory, so a config in a subdirectory works. |
 | `suite` | no | `golden.jsonl` | Path to the golden JSONL suite, relative to the repository root. |
-| `evalshift-version` | no | `0.8.0` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
-| `python-version` | no | `3.14` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.14 for 0.8.0). |
+| `evalshift-version` | no | `0.9.0` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
+| `python-version` | no | `3.14` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.14 for 0.9.0). |
 | `fail-on` | no | `regression` | Gating mode. See [below](#gating-the-fail-on-modes). |
 | `branch` | no | auto | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. |
 | `base-branch` | no | auto | Branch to look for a baseline run on. Auto-detected from the PR base ref, else the current ref. Resolving to empty means no baseline is fetched and the check always passes. |
@@ -515,9 +515,9 @@ the comments API on a long thread.
 It doesn't — output is buffered per command and printed when each finishes. A slow suite is
 silent while it runs.
 
-### `pip install evalshift==0.8.0` fails
+### `pip install evalshift==0.9.0` fails
 
-`python-version` is below the CLI's minimum. EvalShift 0.8.0 needs Python 3.14+.
+`python-version` is below the CLI's minimum. EvalShift 0.9.0 needs Python 3.14+.
 
 ### Costs are higher than expected
 

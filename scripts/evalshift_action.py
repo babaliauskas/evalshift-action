@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 COMMENT_MARKER = "<!-- evalshift:comment -->"
 STATUS_CONTEXT = "evalshift/regression"
 DEFAULT_HOST = "https://api.evalshift.dev"
-DEFAULT_EVALSHIFT_VERSION = "0.8.0"
+DEFAULT_EVALSHIFT_VERSION = "0.9.0"
 
 RequestFn = Callable[[str, str, dict[str, str], bytes | None], Any]
 RunnerFn = Callable[[list[str], Path, dict[str, str]], "CommandResult"]

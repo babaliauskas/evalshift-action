@@ -74,7 +74,7 @@ confirmation prompt, which has no answer on a runner.
 | `host`              | no       | `https://api.evalshift.dev` | Hosted API base URL. Set this only for a self-hosted or staging deployment. |
 | `config`            | no       | `evalshift.yaml`            | Path to your EvalShift config, relative to the repository root. Paths *inside* the config (prompt files, tools) resolve relative to the config file's own directory, so a config in a subdirectory works. |
 | `suite`             | no       | `golden.jsonl`              | Path to the golden JSONL suite, relative to the repository root. |
-| `evalshift-version` | no       | `0.8.0`                     | Exact EvalShift CLI version to install from PyPI. Pin this if you want run-to-run reproducibility across CLI releases. |
+| `evalshift-version` | no       | `0.9.0`                     | Exact EvalShift CLI version to install from PyPI. Pin this if you want run-to-run reproducibility across CLI releases. |
 | `python-version`    | no       | `3.14`                      | Python version used to install and run the CLI. |
 | `fail-on`           | no       | `regression`                | Gating mode. See below. |
 | `branch`            | no       | auto                        | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. Override only when your branch naming differs from the git ref. |

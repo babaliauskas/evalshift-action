@@ -73,8 +73,8 @@ log until it completes.
 | host | no | https://api.evalshift.dev | Hosted API base URL. Trailing `/` stripped. Passed as env `EVALSHIFT_HOST`. Set only for self-hosted/staging. |
 | config | no | evalshift.yaml | Path to config, relative to workspace root. Paths *inside* the config resolve relative to the config file's own directory (CLI behavior), so a config in a subdirectory works unchanged. |
 | suite | no | golden.jsonl | Path to golden JSONL suite, relative to workspace root. |
-| evalshift-version | no | 0.8.0 | Exact CLI version installed from PyPI. Pinned for reproducibility. |
-| python-version | no | 3.14 | Python for the CLI. Must satisfy the CLI's `requires-python` (>=3.14 for 0.8.0); lowering it breaks install. |
+| evalshift-version | no | 0.9.0 | Exact CLI version installed from PyPI. Pinned for reproducibility. |
+| python-version | no | 3.14 | Python for the CLI. Must satisfy the CLI's `requires-python` (>=3.14 for 0.9.0); lowering it breaks install. |
 | fail-on | no | regression | `never` \| `regression` \| `any-slice-regression`. Any other value → hard error before any work. |
 | branch | no | "" (auto) | Candidate branch recorded on the hosted run. Auto-detected; override only for non-standard naming. |
 | base-branch | no | "" (auto) | Branch searched for a baseline run. Auto-detected. If it resolves empty, no baseline lookup happens at all and the check passes. |
@@ -391,7 +391,7 @@ or `fail-on: never`, or `base-branch` resolved empty.
 Two comments on one PR → two action invocations, or the marker comment fell off page 1 of the
 comments API.
 Job is silent for minutes → output is captured and printed per command, not streamed.
-Install fails on `evalshift==0.8.0` → `python-version` below the CLI's `requires-python` (3.14).
+Install fails on `evalshift==0.9.0` → `python-version` below the CLI's `requires-python` (3.14).
 Costs higher than expected → the runner has a cold CLI cache every run; narrow the trigger with
 `on.pull_request.paths`, or shrink the suite.
 
