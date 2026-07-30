@@ -37,6 +37,86 @@ jobs:
 You need two things in repository secrets: `EVALSHIFT_TOKEN` for hosted
 EvalShift, and a model provider key for whatever models your suite compares.
 
+## Storing the token
+
+`token` must come from a GitHub **encrypted secret**. There is no other
+supported storage:
+
+- Never commit it to a file in the repository, and never paste it into workflow
+  YAML as a literal `env:` or `with:` value. Both are readable by anyone who can
+  read the repo, and both survive in git history after you delete the line.
+- Never expose it to `pull_request_target`. That trigger runs the base
+  repository's workflow — with secrets in scope — against a fork's code, so a
+  fork PR can exfiltrate the key. Use `pull_request`, which has no secrets on a
+  fork run and simply fails on the empty `token`.
+
+A repository secret (Settings → Secrets and variables → Actions → New repository
+secret) is enough for most repos, and is what the quick start above uses. For
+production repositories prefer an **environment secret**, so the key is scoped
+to one environment and can carry required reviewers and branch restrictions:
+
+```yaml
+jobs:
+  evalshift:
+    runs-on: ubuntu-latest
+    environment: ci          # the environment that holds EVALSHIFT_TOKEN
+    steps:
+      - uses: actions/checkout@v7
+      - uses: babaliauskas/evalshift-action@v0
+        with:
+          token: ${{ secrets.EVALSHIFT_TOKEN }}
+```
+
+The action registers the token with GitHub's log masking before anything else
+runs, and redacts it out of CLI output — but only inside the job. Masking is not
+a substitute for storing it correctly.
+
+## Use a scoped service-account key
+
+Mint the token from a **service account**, in the EvalShift web app under
+Settings → API tokens → Service accounts (`/app/<org-slug>/settings/tokens`).
+A service account is an org-owned machine identity: it outlives whoever set CI
+up. A personal token is tied to one person's membership — when they leave, the
+membership goes, and your pipeline goes red with it. Do not use a personal token
+for CI.
+
+Give the key the least privilege that still works. The action needs exactly two
+scopes, and the scope picker on that page speaks the same permission keys:
+
+| Scope        | What needs it |
+| ------------ | ------------- |
+| `run:create` | `evalshift push` — creating the hosted run and finalizing the upload. |
+| `run:read`   | The baseline lookup and the diff this action gates on. |
+
+Set the service account's role to `member`; a `viewer` cannot upload a run.
+
+Two things a correctly-scoped key deliberately cannot do:
+
+- **Auto-create the hosted project.** `project:create` is an owner permission and
+  a service account is never an owner. Create the project once in the web app and
+  set `create-project: false`, so a wrong project slug fails as a missing project
+  rather than looking like a credential problem.
+- **Rewrite the project's gating thresholds.** `evalshift push` sends the
+  `thresholds:` block from your `evalshift.yaml` whenever one is present, and
+  rewriting a project's gating policy needs `policy:configure` — also owner-only.
+  Keep thresholds canonical in the web app and out of the config the CI job runs,
+  or the push fails with `Project owner role required`.
+
+When the key is missing a permission, the action prints the exact permission key
+it was denied and how to fix it before exiting non-zero — you never have to guess
+which scope you forgot.
+
+## Rotating the token
+
+1. Rotate the key in the web app. The old one keeps working for a 24-hour grace
+   window, so nothing breaks at the moment you click.
+2. Update the GitHub secret with the new value.
+3. Re-run the workflow, confirm it is green, and let the old key expire.
+
+Doing it in that order means there is never a moment when the running pipeline
+has no valid key. Never edit a key's secret in place — rotation exists precisely
+so a deploy does not race a credential change.
+
 ## Model provider API keys
 
 The action does not manage provider credentials. It passes the job environment

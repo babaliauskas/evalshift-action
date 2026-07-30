@@ -41,7 +41,8 @@ jobs:
 Prerequisites in the repository, all of them hard requirements:
 1. `evalshift.yaml` committed (or `config:` pointed at wherever it lives).
 2. A golden JSONL suite committed (or `suite:` pointed at it).
-3. Repository secret `EVALSHIFT_TOKEN` (an `es_...` hosted token).
+3. Repository (or environment) secret `EVALSHIFT_TOKEN` — an `es_...` service-account key,
+   scoped to `run:create` + `run:read`. See "Token hygiene" below.
 4. A model provider key in the job env matching the models named in `evalshift.yaml`.
 Every run makes real model calls and spends real credits. Cost per run ≈ suite size × 2 models
 (source + target) × prompts, minus CLI cache hits (the runner starts with a cold cache, so in
@@ -236,6 +237,45 @@ Set on every event where `github-token` is non-empty, including `push`. 403/404 
 - Provider API keys are the caller's responsibility: the action passes the job environment
   through unchanged and never sets, reads, or forwards them to the hosted API.
 
+## Token hygiene (service-account keys)
+
+Storage — encrypted GitHub secrets only:
+- Repository secret, environment secret (preferred for production: adds required reviewers and
+  branch restrictions to the credential itself), or org secret. Nothing else is supported.
+- Never a committed file, never a literal `env:`/`with:` value in workflow YAML (readable by
+  anyone who can read the repo, and retained in git history after deletion).
+- Never reachable from `pull_request_target`: that trigger runs the base repo's workflow with
+  secrets in scope against fork code, so a fork PR can exfiltrate the key. Use `pull_request`.
+- Masking/redaction (see "Secrets handling") protects the job's logs only; it is not storage.
+
+Identity — a service account, never a personal token:
+- Mint at EvalShift web app → Settings → API tokens → Service accounts
+  (`/app/<org-slug>/settings/tokens`). Org-owned machine identity; survives the employee who
+  created CI leaving. A personal token dies with its owner's membership and takes the pipeline
+  with it.
+- Service-account roles are `member` or `viewer` only — never owner-equivalent. Use `member`;
+  `viewer` holds `run:read` but not `run:create`.
+
+Scopes — the permission keys the action actually needs (the web-app scope picker uses the same
+vocabulary; scopes are an intersection, so naming a key the role lacks grants nothing):
+| Scope | Needed by |
+|---|---|
+| run:create | `evalshift push`: `POST /runs` + `POST /runs/{id}/finalize` |
+| run:read | `GET /runs/{id}/baseline-compatible` + `GET /runs/{a}/diff/{b}` |
+
+Out of reach for a scoped key, by design:
+- Auto-creating the hosted project (`project:create` is owner-only). Create the project in the
+  web app and set `create-project: false`.
+- Rewriting gating thresholds (`policy:configure` is owner-only). `evalshift push` sends the
+  `thresholds:` block from `evalshift.yaml` whenever one is present, so keep thresholds
+  canonical in the web app and out of the CI config, or push fails
+  `Project owner role required`.
+
+Rotation — overlapping keys, never an in-place secret swap:
+1. Rotate in the web app (the old key keeps working for a 24-hour grace window).
+2. Update the GitHub secret.
+3. Confirm a green run, then let the old key expire.
+
 ## GitHub permissions
 
 | Permission | Needed for |
@@ -274,6 +314,10 @@ the env var covers any other prompt a CLI release adds.
   in the workspace at `.evalshift/runs/<run-id>/`; add your own `actions/upload-artifact` step
   if you want them retained.
 - The action never writes to the repository and never pushes commits.
+- A hosted 403 is self-diagnosing, never a traceback: `HostedClient._get` converts it to an
+  `ActionError` carrying the server's message plus the fix, and `run_command` appends the same
+  guidance when failed CLI output contains `Permission denied: <key>`. Non-403 `HTTPError`s
+  from hosted calls propagate unchanged, and GitHub-side 403/404s stay warnings.
 - Outputs are written before the comment/status calls, so a permissions failure still leaves
   outputs consumable by later steps.
 - `evalshift push` is idempotent on run id (CLI behavior); a re-run of the job creates a new
@@ -382,8 +426,15 @@ model error). The CLI's own stderr is printed directly above, redacted.
 writing a run; almost always a config pointing at a different `--runs-base` or a CWD mismatch.
 `evalshift push did not print a hosted run URL` → CLI output shape changed, or push succeeded
 silently; re-run `evalshift push <run-id>` locally to see what it prints.
-HTTP 401/403 from the hosted API → bad or expired `EVALSHIFT_TOKEN`, wrong `host`, or a
-project-scoped token combined with `create-project: true` on a project that does not exist yet.
+HTTP 401 from the hosted API → bad, revoked, or expired `EVALSHIFT_TOKEN`, or wrong `host`.
+`The EvalShift token is missing the '<key>' permission.` → hosted 403. Printed by the helper for
+a 403 on its own requests and for a `Permission denied: <key>` line in failed CLI output; names
+the exact permission key and points at minting a scoped service-account key. Exit code stays
+non-zero.
+`cannot auto-create project: this token must have owner access to the org` → a service-account
+key cannot create projects; pre-create it and set `create-project: false`.
+`Project owner role required` → push tried to rewrite gating thresholds (`policy:configure`,
+owner-only); drop `thresholds:` from the CI config.
 `warning: could not upsert PR comment: HTTP 403` → missing `pull-requests: write` /
 `issues: write`, or a fork PR with a read-only `GITHUB_TOKEN`. Gate still works.
 Check always green → no compatible baseline on the base branch yet (expected on the first PR),

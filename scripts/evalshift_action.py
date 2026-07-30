@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -24,6 +25,16 @@ COMMENT_MARKER = "<!-- evalshift:comment -->"
 STATUS_CONTEXT = "evalshift/regression"
 DEFAULT_HOST = "https://api.evalshift.dev"
 DEFAULT_EVALSHIFT_VERSION = "0.9.0"
+
+# Hosted EvalShift answers an authorization failure with `Permission denied: <key>`,
+# where the key comes from its permission catalog (run:create, run:read, ...).
+PERMISSION_PATTERN = re.compile(r"Permission denied: ([a-z_]+:[a-z_]+)")
+KEY_ADVICE = (
+    "Mint a service-account key with the scopes this workflow needs "
+    "(EvalShift web app -> Settings -> API tokens -> Service accounts), store it as an "
+    "encrypted repository or environment secret, and point the action's 'token' input at it. "
+    "A personal token is not a CI credential -- it dies with the person who created it."
+)
 
 RequestFn = Callable[[str, str, dict[str, str], bytes | None], Any]
 RunnerFn = Callable[[list[str], Path, dict[str, str]], "CommandResult"]
@@ -119,16 +130,30 @@ class HostedClient:
     def baseline_compatible(self, run_id: str, branch: str) -> dict[str, Any]:
         query = urlencode({"branch": branch})
         path = f"/runs/{quote(run_id)}/baseline-compatible?{query}"
-        data = self._request("GET", self._url(path), self._headers(), None)
+        data = self._get(path)
         if not isinstance(data, dict):
             raise ActionError("hosted baseline-compatible response was not an object")
         return data
 
     def run_diff(self, api_diff_url: str) -> dict[str, Any]:
-        data = self._request("GET", self._url(api_diff_url), self._headers(), None)
+        data = self._get(api_diff_url)
         if not isinstance(data, dict):
             raise ActionError("hosted diff response was not an object")
         return data
+
+    def _get(self, path_or_url: str) -> Any:
+        """GET a hosted endpoint, turning a 403 into an error that says how to fix itself."""
+        try:
+            return self._request("GET", self._url(path_or_url), self._headers(), None)
+        except HTTPError as exc:
+            if exc.code != 403:
+                raise
+            detail = error_body_message(exc)
+            hint = missing_permission_hint(detail) or KEY_ADVICE
+            suffix = f": {detail}" if detail else ""
+            raise ActionError(
+                f"hosted EvalShift refused the request (HTTP 403){suffix}\n{hint}"
+            ) from exc
 
     def _url(self, path_or_url: str) -> str:
         if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
@@ -329,8 +354,41 @@ def run_command(cmd: list[str], cwd: Path, env: dict[str, str]) -> CommandResult
     if completed.stderr:
         print(redact_text(completed.stderr, env), end="", file=sys.stderr)
     if completed.returncode != 0:
-        raise ActionError(f"command failed ({completed.returncode}): {' '.join(cmd)}")
+        message = f"command failed ({completed.returncode}): {' '.join(cmd)}"
+        # The CLI holds the token, so a `run:create` denial surfaces here rather than
+        # on the action's own requests. Repeat it as guidance instead of leaving the
+        # reader to spot one line of CLI output above a generic failure.
+        hint = missing_permission_hint(f"{completed.stdout}\n{completed.stderr}")
+        raise ActionError(f"{message}\n{hint}" if hint else message)
     return CommandResult(stdout=completed.stdout, returncode=completed.returncode)
+
+
+def missing_permission_hint(text: str) -> str | None:
+    """Guidance for a hosted permission denial found in ``text``, else ``None``."""
+    match = PERMISSION_PATTERN.search(text)
+    if match is None:
+        return None
+    return f"The EvalShift token is missing the '{match.group(1)}' permission. {KEY_ADVICE}"
+
+
+def error_body_message(exc: HTTPError) -> str:
+    """The hosted error message carried by a failed response, or an empty string."""
+    try:
+        raw = exc.read()
+    except (AttributeError, OSError, ValueError):
+        return ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return str(raw).strip()
+    error = _dict_field(payload, "error") if isinstance(payload, dict) else {}
+    message = error.get("message")
+    if isinstance(message, str):
+        return message
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    return detail if isinstance(detail, str) else ""
 
 
 def mask_secret(value: str) -> None:

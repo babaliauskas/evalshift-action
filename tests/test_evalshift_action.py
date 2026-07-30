@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -382,6 +383,80 @@ def test_upsert_comment_does_not_update_human_marker_comment() -> None:
 
     assert github.updated is None
     assert github.created_body == "new body"
+
+
+def test_missing_permission_hint_names_the_denied_permission() -> None:
+    body = '{"error": {"code": "forbidden", "message": "Permission denied: run:create"}}'
+
+    hint = action.missing_permission_hint(body)
+
+    assert hint is not None
+    assert "run:create" in hint
+    assert "service-account key" in hint
+
+
+def test_missing_permission_hint_ignores_unrelated_output() -> None:
+    assert action.missing_permission_hint("evalshift: suite golden.jsonl not found") is None
+
+
+def test_hosted_client_turns_403_into_a_self_diagnosing_error() -> None:
+    def forbidden_request(*args: Any, **kwargs: Any) -> Any:
+        raise HTTPError(
+            "https://api.evalshift.test/runs/candidate/baseline-compatible",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(
+                b'{"error": {"code": "forbidden", "message": "Permission denied: run:read"}}'
+            ),
+        )
+
+    client = action.HostedClient(
+        "https://api.evalshift.test", "es_secret", request=forbidden_request
+    )
+
+    with pytest.raises(action.ActionError) as excinfo:
+        client.baseline_compatible("candidate", "main")
+
+    message = str(excinfo.value)
+    assert "403" in message
+    assert "run:read" in message
+    assert "service-account key" in message
+
+
+def test_hosted_client_leaves_other_http_errors_alone() -> None:
+    def failing_request(*args: Any, **kwargs: Any) -> Any:
+        raise HTTPError("https://api.evalshift.test/runs", 500, "Server Error", {}, None)
+
+    client = action.HostedClient(
+        "https://api.evalshift.test", "es_secret", request=failing_request
+    )
+
+    with pytest.raises(HTTPError):
+        client.run_diff("/runs/base/diff/candidate")
+
+
+def test_run_command_failure_explains_a_cli_permission_denial(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class Completed:
+        stdout = ""
+        stderr = "✗ Permission denied: run:create\n"
+        returncode = 1
+
+    def fake_run(*args: Any, **kwargs: Any) -> Completed:
+        return Completed()
+
+    monkeypatch.setattr(action.subprocess, "run", fake_run)
+
+    with pytest.raises(action.ActionError) as excinfo:
+        action.run_command(["evalshift", "push", "run-1"], tmp_path, {})
+
+    message = str(excinfo.value)
+    assert "command failed (1)" in message
+    assert "run:create" in message
+    assert "service-account key" in message
 
 
 def test_set_status_warns_on_permission_error(capsys: pytest.CaptureFixture[str]) -> None:

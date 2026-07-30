@@ -18,21 +18,22 @@ it to the latest run on your base branch, and fails the check when the diff show
 1. [Who this is for](#who-this-is-for)
 2. [Prerequisites](#prerequisites)
 3. [Quick start](#quick-start)
-4. [Secrets and provider keys](#secrets-and-provider-keys)
-5. [Inputs](#inputs)
-6. [Outputs](#outputs)
-7. [Gating: the `fail-on` modes](#gating-the-fail-on-modes)
-8. [What lands on the pull request](#what-lands-on-the-pull-request)
-9. [Permissions](#permissions)
-10. [How it works, step by step](#how-it-works-step-by-step)
-11. [Branch and baseline resolution](#branch-and-baseline-resolution)
-12. [Cost control](#cost-control)
-13. [Recipes](#recipes)
-14. [Security model](#security-model)
-15. [Limits and known edges](#limits-and-known-edges)
-16. [Troubleshooting](#troubleshooting)
-17. [Versioning and stability](#versioning-and-stability)
-18. [FAQ](#faq)
+4. [The EvalShift token](#the-evalshift-token)
+5. [Secrets and provider keys](#secrets-and-provider-keys)
+6. [Inputs](#inputs)
+7. [Outputs](#outputs)
+8. [Gating: the `fail-on` modes](#gating-the-fail-on-modes)
+9. [What lands on the pull request](#what-lands-on-the-pull-request)
+10. [Permissions](#permissions)
+11. [How it works, step by step](#how-it-works-step-by-step)
+12. [Branch and baseline resolution](#branch-and-baseline-resolution)
+13. [Cost control](#cost-control)
+14. [Recipes](#recipes)
+15. [Security model](#security-model)
+16. [Limits and known edges](#limits-and-known-edges)
+17. [Troubleshooting](#troubleshooting)
+18. [Versioning and stability](#versioning-and-stability)
+19. [FAQ](#faq)
 
 ---
 
@@ -58,7 +59,7 @@ Four things, all required:
 | - | ----------- | ------------- |
 | 1 | `evalshift.yaml` committed to the repo | `evalshift init` (or `evalshift demo` for a scaffolded example) |
 | 2 | A golden JSONL suite committed | `evalshift init` writes one; `evalshift capture sync` grows it from production captures |
-| 3 | Repository secret `EVALSHIFT_TOKEN` | Hosted EvalShift → org settings → tokens. Starts with `es_`. |
+| 3 | Repository secret `EVALSHIFT_TOKEN` | Hosted EvalShift → Settings → API tokens → Service accounts. A scoped service-account key, starting with `es_`. See [The EvalShift token](#the-evalshift-token). |
 | 4 | A model provider API key as a repository secret | Whichever provider your config's models belong to |
 
 Verify locally first. If `evalshift all --yes` doesn't pass on your machine, it will not pass on
@@ -109,6 +110,86 @@ The CLI's `evalshift init --ci` scaffolds a near-identical workflow for you.
 The check goes green and the comment says no compatible baseline was found. That's correct
 behavior, not a misconfiguration — there's no trunk run yet to diff against. Merge it, let the
 `push` trigger record a baseline on `main`, and the next PR gets a real comparison.
+
+---
+
+## The EvalShift token
+
+### Storing it
+
+`token` must come from a GitHub **encrypted secret** — repository, environment, or
+organization. There is no other supported storage.
+
+- **Never commit it.** Not to a config file, not to a `.env` the workflow reads, not as a
+  literal `env:` or `with:` value in the workflow YAML. Anyone who can read the repo can read
+  those, and deleting the line later does not remove it from git history.
+- **Never expose it to `pull_request_target`.** That trigger runs the base repository's
+  workflow — with secrets in scope — against a fork's code, so a fork PR can exfiltrate the
+  key. Use `pull_request`: it has no secrets on a fork run, and the action fails cleanly on the
+  empty `token`.
+- **Prefer an environment secret in production repositories.** Scoping the key to a deployment
+  environment lets you attach required reviewers and branch restrictions to the credential
+  itself, rather than trusting every workflow in the repo with it.
+
+```yaml
+jobs:
+  evalshift:
+    runs-on: ubuntu-latest
+    environment: ci          # the environment that holds EVALSHIFT_TOKEN
+    steps:
+      - uses: actions/checkout@v7
+      - uses: babaliauskas/evalshift-action@v0
+        with:
+          token: ${{ secrets.EVALSHIFT_TOKEN }}
+```
+
+Masking is not storage. The action registers the token with GitHub's log masking and redacts it
+out of CLI output, but that only protects the job's own logs.
+
+### Least privilege: a service-account key, not a personal token
+
+Mint the token from a **service account** — EvalShift web app → Settings → API tokens →
+Service accounts, at `/app/<org-slug>/settings/tokens`. A service account is an org-owned
+machine identity, so the credential survives the person who set CI up leaving the team. A
+personal token is tied to one membership; when that membership goes, every pipeline using it
+goes red. Do not use a personal token for CI.
+
+The scope picker on that page speaks EvalShift's permission keys directly. The action needs
+exactly two:
+
+| Scope | What needs it |
+| ----- | ------------- |
+| `run:create` | `evalshift push` — creating the hosted run and finalizing the upload. |
+| `run:read` | `GET /runs/{id}/baseline-compatible` and the diff this action gates on. |
+
+Give the service account the `member` role. A `viewer` holds `run:read` but not `run:create`,
+so it can look but never upload.
+
+Two consequences of a correctly-scoped key, both by design:
+
+- **It cannot auto-create the hosted project.** `project:create` is an owner permission, and a
+  service account is never an owner. Create the project once in the web app, then set
+  `create-project: false` so a wrong project slug reads as a missing project rather than as a
+  credential problem.
+- **It cannot rewrite the project's gating thresholds.** `evalshift push` sends the
+  `thresholds:` block from your `evalshift.yaml` whenever one is present, and rewriting a
+  project's gating policy needs the owner-only `policy:configure`. Keep thresholds canonical in
+  the web app and out of the config the CI job runs, or the push fails with
+  `Project owner role required`.
+
+A denial is self-diagnosing: the action prints the exact permission key the hosted API refused,
+plus how to mint a key that holds it, before exiting non-zero.
+
+### Rotating it
+
+1. **Rotate** the key in the web app. The old one keeps working for a 24-hour grace window.
+2. **Update** the GitHub secret with the new value.
+3. **Confirm** a green run on the new key, then let the old one expire.
+
+In that order there is never a moment when the pipeline holds no valid key. Never swap a key's
+secret in place — overlapping keys exist precisely so a running deploy cannot race a credential
+change. Keys that stop being used are flagged as stale in the web app; a key you rotated away
+from should show up dead there within the grace window.
 
 ---
 
@@ -441,6 +522,9 @@ human user will create a new comment on every run instead of updating one.
   so the action will fail on `token` being empty. That's GitHub's design, and working around it
   with `pull_request_target` means running untrusted code with your secrets in scope — don't,
   unless you fully understand the exposure.
+- **The hosted key is a scoped machine credential.** Mint it from a service account with only
+  `run:create` and `run:read`, store it as an encrypted secret, and rotate it through the
+  overlapping-key flow. Details and rationale: [The EvalShift token](#the-evalshift-token).
 - **Dependencies.** The runtime helper is stdlib-only. `pip-audit` runs in this repo's own CI.
 
 ---
@@ -490,10 +574,28 @@ that redirects run artifacts elsewhere, or a working-directory mismatch.
 The push didn't emit a URL on its last output line. Run `evalshift push <run-id>` locally
 against the same host and see what it prints. Also check for a CLI version mismatch.
 
-### HTTP 401 or 403 from the hosted API
+### HTTP 401 from the hosted API
 
-Bad or expired `EVALSHIFT_TOKEN`, wrong `host`, or a project-scoped token trying to auto-create
-a project. Verify with `evalshift whoami` locally using the same token.
+Bad, revoked, or expired `EVALSHIFT_TOKEN`, or the wrong `host`. Verify with `evalshift whoami`
+locally using the same token. A key past its rotation grace window authenticates as nobody.
+
+### `The EvalShift token is missing the '<key>' permission`
+
+The key authenticated fine but its scopes (or its service account's role) don't cover what the
+step needed. Widen the scope on the existing key, or mint one that holds it — see
+[Least privilege](#least-privilege-a-service-account-key-not-a-personal-token). The two the
+action always needs are `run:create` and `run:read`.
+
+### `cannot auto-create project: this token must have owner access to the org`
+
+A service-account key cannot create projects; `project:create` is owner-only. Create the project
+in the web app and set `create-project: false`.
+
+### `Project owner role required`
+
+`evalshift push` tried to rewrite the project's gating thresholds, which needs the owner-only
+`policy:configure`. Remove the `thresholds:` block from the config the CI job runs and manage
+thresholds in the web app.
 
 ### `warning: could not upsert PR comment: HTTP 403`
 
