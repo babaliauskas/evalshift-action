@@ -26,6 +26,17 @@ STATUS_CONTEXT = "evalshift/regression"
 DEFAULT_HOST = "https://api.evalshift.dev"
 DEFAULT_EVALSHIFT_VERSION = "0.9.0"
 
+# One EvalShift run per job. A matrix asks once per job, and the server counts the
+# in-flight runs itself, so declaring anything larger here would be a guess.
+PREFLIGHT_PARALLELISM = 1
+
+# `project: org/project` at the top level of evalshift.yaml. Read with a regex rather than a
+# YAML parser because the action ships with no dependencies, and the CLI constrains the key to
+# exactly this shape. Anything this misses costs only the preflight, which is fail-open.
+PROJECT_KEY_PATTERN = re.compile(
+    r"""^project:\s*["']?([a-z0-9-]+)/([a-z0-9-]+)["']?\s*(?:\#.*)?$"""
+)
+
 # Hosted EvalShift answers an authorization failure with `Permission denied: <key>`,
 # where the key comes from its permission catalog (run:create, run:read, ...).
 PERMISSION_PATTERN = re.compile(r"Permission denied: ([a-z_]+:[a-z_]+)")
@@ -53,6 +64,9 @@ class ActionConfig:
     create_project: bool
     comment: bool
     github_token: str
+    # Asserted by the workflow, not verified by EvalShift. Defaults to public: the server
+    # records the first `true` permanently, so guessing `true` would be the costly guess.
+    repo_private: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> ActionConfig:
@@ -77,6 +91,7 @@ class ActionConfig:
             create_project=_bool_input(source, "CREATE_PROJECT", True),
             comment=_bool_input(source, "COMMENT", True),
             github_token=_input(source, "GITHUB_TOKEN", ""),
+            repo_private=_bool_input(source, "REPO_PRIVATE", False),
         )
 
 
@@ -115,6 +130,19 @@ class ActionError(Exception):
     """Raised for action-level user or runtime failures."""
 
 
+class PreflightDenied(ActionError):
+    """402 from the CI preflight: this job is not covered by the organization's plan.
+
+    ``details`` is the server's whole upgrade prompt — feature, tier, limit, used, reset date
+    and upgrade URL. The action never decides what a plan covers; it renders what it was told.
+    """
+
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.message = message
+        self.details = details
+
+
 class HostedClient:
     def __init__(
         self,
@@ -140,6 +168,48 @@ class HostedClient:
         if not isinstance(data, dict):
             raise ActionError("hosted diff response was not an object")
         return data
+
+    def find_project_id(self, org_slug: str, project_slug: str) -> str | None:
+        """The hosted id of ``org_slug/project_slug``, or ``None`` when it does not exist yet."""
+        data = self._request(
+            "GET",
+            self._url(f"/orgs/{quote(org_slug)}/projects"),
+            self._headers(),
+            None,
+        )
+        if not isinstance(data, list):
+            return None
+        for item in data:
+            if not isinstance(item, dict) or item.get("slug") != project_slug:
+                continue
+            project_id = item.get("id")
+            return str(project_id) if project_id else None
+        return None
+
+    def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
+        """Ask whether this job may run at all, before the suite spends anyone's money.
+
+        Raises ``PreflightDenied`` on the server's 402. Every other failure is left to the
+        caller, which treats it as an infrastructure problem and lets the run continue.
+        """
+        payload = json.dumps(
+            {"repo_private": repo_private, "parallelism": PREFLIGHT_PARALLELISM}
+        ).encode("utf-8")
+        try:
+            self._request(
+                "POST",
+                self._url(f"/projects/{quote(project_id)}/ci-preflight"),
+                self._headers(),
+                payload,
+            )
+        except HTTPError as exc:
+            if exc.code != 402:
+                raise
+            message, details = error_body(exc)
+            raise PreflightDenied(
+                message or "this run is not covered by the organization's EvalShift plan",
+                details,
+            ) from exc
 
     def _get(self, path_or_url: str) -> Any:
         """GET a hosted endpoint, turning a 403 into an error that says how to fix itself."""
@@ -371,24 +441,137 @@ def missing_permission_hint(text: str) -> str | None:
     return f"The EvalShift token is missing the '{match.group(1)}' permission. {KEY_ADVICE}"
 
 
-def error_body_message(exc: HTTPError) -> str:
-    """The hosted error message carried by a failed response, or an empty string."""
+def error_body(exc: HTTPError) -> tuple[str, dict[str, Any]]:
+    """The hosted error's message and details, from a body that can only be read once."""
     try:
         raw = exc.read()
     except (AttributeError, OSError, ValueError):
-        return ""
+        return "", {}
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", "replace")
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError):
-        return str(raw).strip()
-    error = _dict_field(payload, "error") if isinstance(payload, dict) else {}
+        return str(raw).strip(), {}
+    if not isinstance(payload, dict):
+        return "", {}
+    error = _dict_field(payload, "error")
+    details = _dict_field(error, "details")
     message = error.get("message")
     if isinstance(message, str):
-        return message
-    detail = payload.get("detail") if isinstance(payload, dict) else None
-    return detail if isinstance(detail, str) else ""
+        return message, details
+    detail = payload.get("detail")
+    return (detail if isinstance(detail, str) else ""), details
+
+
+def error_body_message(exc: HTTPError) -> str:
+    """The hosted error message carried by a failed response, or an empty string."""
+    return error_body(exc)[0]
+
+
+def project_ref_from_config(config_path: Path) -> tuple[str, str] | None:
+    """The hosted ``(org, project)`` this config pushes to, or ``None`` when it says nothing.
+
+    A config without a `project` key pushes to whatever `--project` or the bundle names, which
+    the action cannot know before the CLI runs — so the preflight is skipped rather than
+    guessed at.
+    """
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = PROJECT_KEY_PATTERN.match(line)
+        if match is not None:
+            return match.group(1), match.group(2)
+    return None
+
+
+def run_preflight(
+    hosted: Any,
+    *,
+    project_ref: tuple[str, str] | None,
+    repo_private: bool,
+) -> PreflightDenied | None:
+    """Ask hosted EvalShift whether this job may run, before the suite costs anything.
+
+    Fail-closed on billing, fail-open on infrastructure: a 402 comes back as a denial the
+    caller must act on, while an outage, an unknown project, or a token that cannot list
+    projects only prints a warning. A billing check that breaks every customer's CI when the
+    billing service is down is worse than one that occasionally lets a run through.
+    """
+    if project_ref is None:
+        return None
+    org_slug, project_slug = project_ref
+    try:
+        project_id = hosted.find_project_id(org_slug, project_slug)
+        if project_id is None:
+            # Nothing to check yet: the project is created by the first `evalshift push`,
+            # and the server gates that upload on its own.
+            return None
+        hosted.ci_preflight(project_id, repo_private=repo_private)
+    except PreflightDenied as denial:
+        return denial
+    # OSError covers HTTPError and URLError; ActionError covers a wrapped 403.
+    except (OSError, ValueError, ActionError) as exc:
+        print(f"warning: plan preflight skipped: {exc}", file=sys.stderr)
+    return None
+
+
+def build_preflight_body(denial: PreflightDenied) -> str:
+    """The denial as markdown, for the step summary and the PR comment alike."""
+    details = denial.details
+    lines = [
+        COMMENT_MARKER,
+        "## EvalShift did not run",
+        "",
+        denial.message,
+        "",
+        f"**Plan:** `{details.get('tier') or 'unknown'}`",
+        f"**Blocked by:** `{details.get('feature') or 'plan limits'}`",
+    ]
+    limit = details.get("limit")
+    if isinstance(limit, int):
+        used = details.get("used")
+        lines.append(f"**Limit:** {limit}" + (f" (used {used})" if isinstance(used, int) else ""))
+    resets_at = details.get("resets_at")
+    if isinstance(resets_at, str) and resets_at:
+        lines.append(f"**Resets:** {resets_at}")
+    upgrade_url = details.get("upgrade_url")
+    if isinstance(upgrade_url, str) and upgrade_url:
+        lines.append(f"**Upgrade:** [plans and billing]({upgrade_url})")
+    return "\n".join(lines)
+
+
+def error_annotation(message: str) -> str:
+    """A GitHub ``::error::`` command. Workflow commands are one line, so newlines escape."""
+    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return f"::error title=EvalShift::{escaped}"
+
+
+def write_step_summary(body: str, env: Mapping[str, str] | None = None) -> None:
+    summary_path = (env if env is not None else os.environ).get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    with Path(summary_path).open("a", encoding="utf-8") as fh:
+        fh.write(f"{body}\n")
+
+
+def report_preflight_denial(
+    denial: PreflightDenied,
+    config: ActionConfig,
+    context: GitHubContext,
+) -> None:
+    """Say why the job stopped in all three places a developer might look."""
+    body = build_preflight_body(denial)
+    upgrade_url = denial.details.get("upgrade_url")
+    annotation = denial.message
+    if isinstance(upgrade_url, str) and upgrade_url:
+        annotation = f"{annotation}\nUpgrade: {upgrade_url}"
+    print(error_annotation(annotation))
+    write_step_summary(body)
+    if config.github_token and config.comment:
+        upsert_pr_comment(GitHubClient(config.github_token), context, body)
 
 
 def mask_secret(value: str) -> None:
@@ -576,8 +759,25 @@ def main() -> int:
         mask_secret(config.token)
         mask_secret(config.github_token)
         context = detect_context(os.environ, config.branch, config.base_branch)
-        run = run_evalshift_commands(config, cwd=Path.cwd())
         hosted = HostedClient(config.host, config.token)
+        denial = run_preflight(
+            hosted,
+            project_ref=project_ref_from_config(Path(config.config)),
+            repo_private=config.repo_private,
+        )
+        if denial is not None:
+            report_preflight_denial(denial, config, context)
+            write_outputs(
+                {
+                    "run_url": "",
+                    "diff_url": "",
+                    "run_id": "",
+                    "regression_count": 0,
+                    "conclusion": "failure",
+                }
+            )
+            return 1
+        run = run_evalshift_commands(config, cwd=Path.cwd())
         baseline_payload = (
             hosted.baseline_compatible(run.run_id, context.base_branch)
             if context.base_branch

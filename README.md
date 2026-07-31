@@ -162,6 +162,7 @@ confirmation prompt, which has no answer on a runner.
 | `create-project`    | no       | `true`                      | Whether `evalshift push` may auto-create the hosted project when it does not exist yet. Set `false` to make a missing project a hard failure instead. |
 | `comment`           | no       | `true`                      | Whether to create or update the PR comment. Set `false` to keep the commit status but stay out of the conversation. |
 | `github-token`      | no       | `github.token`              | Token used for the PR comment and the commit status. Override only when you want the comment posted by a bot account rather than `github-actions`. |
+| `repo-private`      | no       | repository visibility       | Whether this repository is private, used for the plan preflight. Defaults to the GitHub context; set it explicitly only if you mirror a private repository into a public one, or vice versa. |
 
 ### `fail-on` modes
 
@@ -211,14 +212,36 @@ run — the gate still works.
 ## What the action does
 
 1. Installs Python and the pinned EvalShift CLI.
-2. Runs `evalshift all --yes` against your config and suite, writing run state to
+2. Asks hosted EvalShift whether this job is covered by the organization's plan, before
+   spending any model credits. See [Plan limits](#plan-limits).
+3. Runs `evalshift all --yes` against your config and suite, writing run state to
    `.evalshift/runs` in the workspace.
-3. Pushes the completed run to hosted EvalShift, creating the project if needed.
-4. Asks the hosted API for a compatible baseline run on the base branch and
+4. Pushes the completed run to hosted EvalShift, creating the project if needed.
+5. Asks the hosted API for a compatible baseline run on the base branch and
    fetches the diff.
-5. Writes the outputs, upserts a single PR comment (marked so it updates in place
+6. Writes the outputs, upserts a single PR comment (marked so it updates in place
    instead of stacking), and sets the `evalshift/regression` commit status.
-6. Exits non-zero when `fail-on` says the diff is a regression.
+7. Exits non-zero when `fail-on` says the diff is a regression.
+
+## Plan limits
+
+Some plan limits are cheaper to discover before the suite runs than halfway through it, so the
+action asks first: it reads `project: <org>/<project>` from your config, resolves that project,
+and calls `POST /projects/{id}/ci-preflight` with the repository's visibility.
+
+If the answer is a `402`, the job stops before any model credits are spent. You get an
+`::error::` annotation, a step summary, and — on a pull request — the usual EvalShift comment
+carrying the server's message, the plan you're on, what was blocked, and an upgrade link. The
+common case is private-repo CI, which needs a paid plan.
+
+Anything else — EvalShift being down, a project that doesn't exist yet, a token that can't list
+projects — is treated as an infrastructure problem: the action logs a warning and runs anyway.
+A billing check that breaks everyone's CI when the billing service is down is worse than one
+that occasionally lets a run through, and the server still enforces limits on the upload.
+
+`repo-private` comes from the GitHub context and is *reported* to EvalShift, not verified by
+it. The server records the first `true` permanently, so a project that has ever reported
+private stays private.
 
 ## Dogfood workflow
 

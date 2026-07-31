@@ -6,8 +6,8 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-from urllib.error import HTTPError
+from typing import Any, ClassVar
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -457,6 +457,330 @@ def test_run_command_failure_explains_a_cli_permission_denial(
     assert "command failed (1)" in message
     assert "run:create" in message
     assert "service-account key" in message
+
+
+DENIAL_BODY = json.dumps(
+    {
+        "error": {
+            "code": "payment_required",
+            "message": "Private-repo CI is not included in the Free plan.",
+            "details": {
+                "feature": "private_repo_ci",
+                "limit": None,
+                "used": None,
+                "tier": "free",
+                "status": "active",
+                "resets_at": None,
+                "upgrade_url": "https://app.evalshift.dev/app/acme/settings/billing",
+            },
+        }
+    }
+).encode("utf-8")
+
+
+def _http_error(code: int, body: bytes | None = None) -> HTTPError:
+    return HTTPError(
+        "https://api.evalshift.test/projects/p-1/ci-preflight",
+        code,
+        "Payment Required",
+        {},
+        io.BytesIO(body) if body is not None else None,
+    )
+
+
+def test_ci_preflight_posts_the_visibility_flag_and_parallelism() -> None:
+    requests: list[tuple[str, str, dict[str, str], bytes | None]] = []
+
+    def fake_request(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        data: bytes | None = None,
+    ) -> dict[str, Any]:
+        requests.append((method, url, headers, data))
+        return {"allowed": True}
+
+    client = action.HostedClient("https://api.evalshift.test", "es_secret", request=fake_request)
+
+    client.ci_preflight("p-1", repo_private=True)
+
+    method, url, headers, data = requests[0]
+    assert method == "POST"
+    assert url == "https://api.evalshift.test/projects/p-1/ci-preflight"
+    assert headers["Authorization"] == "Bearer es_secret"
+    assert data is not None
+    assert json.loads(data) == {
+        "repo_private": True,
+        "parallelism": action.PREFLIGHT_PARALLELISM,
+    }
+
+
+def test_ci_preflight_402_carries_the_servers_message_and_details() -> None:
+    def denied_request(*args: Any, **kwargs: Any) -> Any:
+        raise _http_error(402, DENIAL_BODY)
+
+    client = action.HostedClient("https://api.evalshift.test", "es_secret", request=denied_request)
+
+    with pytest.raises(action.PreflightDenied) as excinfo:
+        client.ci_preflight("p-1", repo_private=True)
+
+    denial = excinfo.value
+    assert denial.message == "Private-repo CI is not included in the Free plan."
+    assert denial.details["feature"] == "private_repo_ci"
+    assert denial.details["tier"] == "free"
+
+
+def test_find_project_id_matches_the_project_slug() -> None:
+    def fake_request(*args: Any, **kwargs: Any) -> Any:
+        return [
+            {"id": "p-0", "slug": "other"},
+            {"id": "p-1", "slug": "checkout"},
+        ]
+
+    client = action.HostedClient("https://api.evalshift.test", "es_secret", request=fake_request)
+
+    assert client.find_project_id("acme", "checkout") == "p-1"
+    assert client.find_project_id("acme", "missing") is None
+
+
+def test_project_ref_from_config_reads_the_project_key(tmp_path: Path) -> None:
+    config = tmp_path / "evalshift.yaml"
+    config.write_text('version: 1\nproject: "acme/checkout"\nprompts: []\n', encoding="utf-8")
+
+    assert action.project_ref_from_config(config) == ("acme", "checkout")
+
+
+def test_project_ref_from_config_ignores_a_nested_project_key(tmp_path: Path) -> None:
+    """Only the top-level `project:` names the hosted project; an indented one is something else."""
+    config = tmp_path / "evalshift.yaml"
+    config.write_text("version: 1\ndefaults:\n  project: acme/nested\n", encoding="utf-8")
+
+    assert action.project_ref_from_config(config) is None
+
+
+def test_project_ref_from_config_returns_none_when_the_file_is_missing(tmp_path: Path) -> None:
+    assert action.project_ref_from_config(tmp_path / "nope.yaml") is None
+
+
+def test_run_preflight_returns_the_denial_on_402() -> None:
+    class DeniedClient:
+        def find_project_id(self, org_slug: str, project_slug: str) -> str:
+            return "p-1"
+
+        def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
+            raise action.PreflightDenied("nope", {"feature": "private_repo_ci"})
+
+    denial = action.run_preflight(
+        DeniedClient(), project_ref=("acme", "checkout"), repo_private=True
+    )
+
+    assert denial is not None
+    assert denial.message == "nope"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _http_error(500),
+        _http_error(404),
+        _http_error(403),
+        URLError("connection refused"),
+    ],
+)
+def test_run_preflight_never_blocks_on_an_infrastructure_failure(
+    failure: Exception,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fail-open on infrastructure: an EvalShift outage must not break every customer's CI."""
+
+    class BrokenClient:
+        def find_project_id(self, org_slug: str, project_slug: str) -> str:
+            return "p-1"
+
+        def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
+            raise failure
+
+    assert (
+        action.run_preflight(BrokenClient(), project_ref=("acme", "checkout"), repo_private=True)
+        is None
+    )
+    assert "preflight" in capsys.readouterr().err
+
+
+def test_run_preflight_is_skipped_when_the_project_is_not_hosted_yet() -> None:
+    class EmptyClient:
+        def find_project_id(self, org_slug: str, project_slug: str) -> None:
+            return None
+
+        def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
+            raise AssertionError("preflight must not run without a resolved project")
+
+    assert (
+        action.run_preflight(EmptyClient(), project_ref=("acme", "checkout"), repo_private=True)
+        is None
+    )
+
+
+def test_run_preflight_is_skipped_without_a_project_ref() -> None:
+    class UnusedClient:
+        def find_project_id(self, org_slug: str, project_slug: str) -> str:
+            raise AssertionError("no project ref means nothing to look up")
+
+    assert action.run_preflight(UnusedClient(), project_ref=None, repo_private=True) is None
+
+
+def test_preflight_body_names_the_plan_the_block_and_the_upgrade_url() -> None:
+    denial = action.PreflightDenied(
+        "Private-repo CI is not included in the Free plan.",
+        {
+            "feature": "private_repo_ci",
+            "tier": "free",
+            "limit": None,
+            "used": None,
+            "resets_at": None,
+            "upgrade_url": "https://app.evalshift.dev/app/acme/settings/billing",
+        },
+    )
+
+    body = action.build_preflight_body(denial)
+
+    assert action.COMMENT_MARKER in body
+    assert "Private-repo CI is not included in the Free plan." in body
+    assert "free" in body
+    assert "private_repo_ci" in body
+    assert "https://app.evalshift.dev/app/acme/settings/billing" in body
+
+
+def test_preflight_body_reports_a_quota_limit_and_its_reset_date() -> None:
+    denial = action.PreflightDenied(
+        "This organization has used all 100 runs in its plan.",
+        {
+            "feature": "runs_per_month",
+            "tier": "free",
+            "limit": 100,
+            "used": 100,
+            "resets_at": "2026-08-01",
+            "upgrade_url": "https://app.evalshift.dev/app/acme/settings/billing",
+        },
+    )
+
+    body = action.build_preflight_body(denial)
+
+    assert "100" in body
+    assert "2026-08-01" in body
+
+
+def test_error_annotation_is_a_single_line() -> None:
+    annotation = action.error_annotation("blocked\nupgrade here")
+
+    assert annotation.startswith("::error title=EvalShift::")
+    assert "\n" not in annotation
+    assert "%0A" in annotation
+
+
+class FakePreflightHostedClient:
+    """Stands in for ``HostedClient`` in ``main`` — denies the preflight, records nothing else."""
+
+    denied: ClassVar[bool] = True
+    calls: ClassVar[list[tuple[str, bool]]] = []
+
+    def __init__(self, host: str, token: str) -> None:
+        self.host = host
+        self.token = token
+
+    def find_project_id(self, org_slug: str, project_slug: str) -> str:
+        return "p-1"
+
+    def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
+        type(self).calls.append((project_id, repo_private))
+        if type(self).denied:
+            raise action.PreflightDenied(
+                "Private-repo CI is not included in the Free plan.",
+                {
+                    "feature": "private_repo_ci",
+                    "tier": "free",
+                    "limit": None,
+                    "used": None,
+                    "resets_at": None,
+                    "upgrade_url": "https://app.evalshift.dev/app/acme/settings/billing",
+                },
+            )
+
+    def baseline_compatible(self, run_id: str, branch: str) -> dict[str, Any]:
+        return {}
+
+    def run_diff(self, api_diff_url: str) -> dict[str, Any]:
+        return {}
+
+
+def _preflight_workspace(tmp_path: Path) -> None:
+    (tmp_path / "evalshift.yaml").write_text("version: 1\nproject: acme/checkout\n", "utf-8")
+
+
+def test_a_denied_preflight_fails_the_job_without_running_the_suite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _preflight_workspace(tmp_path)
+    summary = tmp_path / "summary.md"
+    FakePreflightHostedClient.denied = True
+    FakePreflightHostedClient.calls = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(action, "HostedClient", FakePreflightHostedClient)
+
+    def refuse_to_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the suite must not run after a denied preflight")
+
+    monkeypatch.setattr(action, "run_evalshift_commands", refuse_to_run)
+    for key in list(os.environ):
+        if key.startswith(("INPUT_", "GITHUB_")):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("INPUT_TOKEN", "es_secret")
+    monkeypatch.setenv("INPUT_REPO_PRIVATE", "true")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    exit_code = action.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert FakePreflightHostedClient.calls == [("p-1", True)]
+    assert "::error title=EvalShift::" in captured.out
+    assert "Private-repo CI is not included in the Free plan." in captured.out
+    assert "https://app.evalshift.dev/app/acme/settings/billing" in summary.read_text("utf-8")
+
+
+def test_an_allowed_preflight_lets_the_suite_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _preflight_workspace(tmp_path)
+    FakePreflightHostedClient.denied = False
+    FakePreflightHostedClient.calls = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(action, "HostedClient", FakePreflightHostedClient)
+    ran: list[bool] = []
+
+    def fake_run(*args: Any, **kwargs: Any) -> action.EvalShiftRunResult:
+        ran.append(True)
+        return action.EvalShiftRunResult(run_id="run-1", run_url="https://app.test/run")
+
+    monkeypatch.setattr(action, "run_evalshift_commands", fake_run)
+    for key in list(os.environ):
+        if key.startswith(("INPUT_", "GITHUB_")):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("INPUT_TOKEN", "es_secret")
+    monkeypatch.setenv("INPUT_REPO_PRIVATE", "false")
+
+    exit_code = action.main()
+
+    assert exit_code == 0
+    assert ran == [True]
+    assert FakePreflightHostedClient.calls == [("p-1", False)]
+
+
+def test_repo_private_input_defaults_to_the_github_context() -> None:
+    assert _manifest_input_default("repo-private") == "${{ github.event.repository.private }}"
 
 
 def test_set_status_warns_on_permission_error(capsys: pytest.CaptureFixture[str]) -> None:

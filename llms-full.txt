@@ -6,7 +6,8 @@ Kind: composite GitHub Action (not JavaScript, not Docker)
 Marketplace name: "EvalShift" | branding: bar-chart-2 / purple
 Runtime helper: scripts/evalshift_action.py (stdlib only, no third-party deps)
 
-Purpose: run an EvalShift golden suite inside CI, push the completed run to hosted EvalShift,
+Purpose: check the org's plan covers this job before spending credits, run an EvalShift golden
+suite inside CI, push the completed run to hosted EvalShift,
 ask the hosted API for a compatible baseline run on the base branch, fetch the hosted diff,
 write action outputs, keep exactly one PR comment up to date, set the `evalshift/regression`
 commit status, and exit non-zero when the diff is a regression under the selected `fail-on`
@@ -42,7 +43,8 @@ Prerequisites in the repository, all of them hard requirements:
 1. `evalshift.yaml` committed (or `config:` pointed at wherever it lives).
 2. A golden JSONL suite committed (or `suite:` pointed at it).
 3. Repository (or environment) secret `EVALSHIFT_TOKEN` — an `es_...` service-account key,
-   scoped to `run:create` + `run:read`. See "Token hygiene" below.
+   scoped to `run:create` + `run:read`. See "Token hygiene" below. (`project:read` additionally
+   enables the plan preflight; without it the preflight is skipped, not failed.)
 4. A model provider key in the job env matching the models named in `evalshift.yaml`.
 Every run makes real model calls and spends real credits. Cost per run ≈ suite size × 2 models
 (source + target) × prompts, minus CLI cache hits (the runner starts with a cold cache, so in
@@ -82,6 +84,7 @@ log until it completes.
 | create-project | no | true | When false, appends `--no-create-project` to `evalshift push`, making a missing hosted project a hard failure. |
 | comment | no | true | Whether to upsert the PR comment. Commit status is set regardless. |
 | github-token | no | `${{ github.token }}` | Token for the PR comment and commit status. Also masked. If empty, both comment and status are skipped entirely. |
+| repo-private | no | `${{ github.event.repository.private }}` | Repository visibility, asserted to the CI preflight (never verified server-side). Drives the `private_repo_ci` entitlement check. |
 
 Boolean inputs are truthy for `1`, `true`, `yes`, `on` (case-insensitive); everything else is
 false. All inputs are `.strip()`ed.
@@ -119,10 +122,45 @@ exist`; empty directory → `no local EvalShift runs found in ...`.
 `http://` or `https://`. A CLI release that stops printing a bare URL as the last line breaks
 this (guarded by the `cli-contract` CI job, which only checks flags, not output shape).
 
+## Plan preflight (runs BEFORE the CLI)
+
+Purpose: refuse a job the org's plan does not cover before any model credits are spent.
+
+Sequence, all skippable, all before `evalshift all`:
+1. `project_ref_from_config(Path(config))` — regex `^project:\s*["']?([a-z0-9-]+)/([a-z0-9-]+)`
+   against the config file, one line at a time. No YAML parser (helper is dependency-free).
+   No match (or unreadable file) → preflight skipped entirely, run proceeds.
+2. `GET {host}/orgs/{org}/projects` → first item whose `slug` matches → its `id`. Needs
+   `project:read`. No match → skipped (the project is created by the first `evalshift push`).
+3. `POST {host}/projects/{id}/ci-preflight` with body
+   `{"repo_private": <bool from repo-private input>, "parallelism": 1}`.
+   `PREFLIGHT_PARALLELISM = 1` is a constant, not an input: one EvalShift run per job, and the
+   server counts in-flight runs itself.
+
+Outcomes:
+- `200 {"allowed": true}` → continue.
+- `402` → `PreflightDenied(message, details)`, job fails immediately with exit 1, `evalshift`
+  never runs. `details` is the server's envelope: `feature`, `tier`, `limit`, `used`,
+  `status`, `resets_at`, `upgrade_url`. The action renders it and decides nothing itself.
+- Anything else (5xx, 403, 404, timeout, DNS, malformed body) → `warning: plan preflight
+  skipped: <exc>` on stderr, run proceeds. Fail-closed on billing, fail-open on infrastructure.
+
+Denial rendering, all three from the same markdown body (`build_preflight_body`):
+- stdout: `::error title=EvalShift::<message>%0AUpgrade: <upgrade_url>` (workflow commands are
+  single-line; `%`/`\r`/`\n` escape to `%25`/`%0D`/`%0A`).
+- `$GITHUB_STEP_SUMMARY`: the body, appended.
+- PR comment: the same body via `upsert_pr_comment`, carrying `COMMENT_MARKER`, so it replaces
+  the regular EvalShift comment rather than stacking. Requires `github-token` + `comment: true`.
+Outputs on denial: `run_url=""`, `diff_url=""`, `run_id=""`, `regression_count=0`,
+`conclusion=failure`.
+
+`repo_private` is client-asserted; the server cannot verify it and records the first `true`
+permanently (set-once), so a later `false` from the same project changes nothing.
+
 ## Hosted API contract used
 
-Auth on both calls: `Authorization: Bearer <token>`, `Accept: application/json`, 30s timeout,
-stdlib `urllib`.
+Auth on all calls: `Authorization: Bearer <token>`, `Accept: application/json`, 30s timeout,
+stdlib `urllib`. The preflight calls above use the same client and headers.
 
 1. `GET {host}/runs/{run_id}/baseline-compatible?branch={base_branch}`
    Response (object required, else hard error):
@@ -307,6 +345,12 @@ the env var covers any other prompt a CLI release adds.
   AFTER the composite has already installed Python and the CLI — a misconfigured workflow still
   burns install time, but never model credits.
 - Invalid `fail-on` → `input 'fail-on' must be one of: never, regression, any-slice-regression`.
+- A denied preflight fails the job regardless of `fail-on`, including `never`: `fail-on`
+  governs regressions, not whether the plan permits the run at all.
+- The action never decides what a plan covers. It renders the server's 402 message, details and
+  `upgrade_url`, and exits non-zero. No entitlement is inferred, cached, or hard-coded.
+- A preflight that cannot get an answer never blocks a run; the server re-checks every limit at
+  `POST /runs` and at finalize, so skipping it bypasses nothing.
 - No baseline (empty `base_branch`, null `api_diff_url`, or first run on a branch) → check
   passes, `regression_count=0`, `diff_url=""`, comment says so explicitly. First PR against a
   repo with no history therefore always goes green.
@@ -435,6 +479,12 @@ non-zero.
 key cannot create projects; pre-create it and set `create-project: false`.
 `Project owner role required` → push tried to rewrite gating thresholds (`policy:configure`,
 owner-only); drop `thresholds:` from the CI config.
+Job failed before the CLI ran, with a plan message and an upgrade link → CI preflight got a
+402; the org's plan does not cover this run (usually private-repo CI on Free). Nothing ran,
+nothing was charged.
+`warning: plan preflight skipped: <exc>` → preflight got no answer (project not hosted yet,
+token without `project:read`, hosted API unreachable). Intended: the run continues and the
+server enforces the limit at upload.
 `warning: could not upsert PR comment: HTTP 403` → missing `pull-requests: write` /
 `issues: write`, or a fork PR with a read-only `GITHUB_TOKEN`. Gate still works.
 Check always green → no compatible baseline on the base branch yet (expected on the first PR),

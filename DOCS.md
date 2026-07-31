@@ -28,12 +28,13 @@ it to the latest run on your base branch, and fails the check when the diff show
 11. [How it works, step by step](#how-it-works-step-by-step)
 12. [Branch and baseline resolution](#branch-and-baseline-resolution)
 13. [Cost control](#cost-control)
-14. [Recipes](#recipes)
-15. [Security model](#security-model)
-16. [Limits and known edges](#limits-and-known-edges)
-17. [Troubleshooting](#troubleshooting)
-18. [Versioning and stability](#versioning-and-stability)
-19. [FAQ](#faq)
+14. [Plan limits and the CI preflight](#plan-limits-and-the-ci-preflight)
+15. [Recipes](#recipes)
+16. [Security model](#security-model)
+17. [Limits and known edges](#limits-and-known-edges)
+18. [Troubleshooting](#troubleshooting)
+19. [Versioning and stability](#versioning-and-stability)
+20. [FAQ](#faq)
 
 ---
 
@@ -236,6 +237,7 @@ means a hung job.
 | `create-project` | no | `true` | Whether `evalshift push` may auto-create the hosted project when it doesn't exist. Set `false` to make a missing project a hard failure. |
 | `comment` | no | `true` | Whether to create or update the PR comment. Set `false` to keep the commit status but stay out of the conversation. |
 | `github-token` | no | `github.token` | Token used for the PR comment and the commit status. Override only to have a bot account post instead of `github-actions`. |
+| `repo-private` | no | `${{ github.event.repository.private }}` | Whether this repository is private, used by the [plan preflight](#plan-limits-and-the-ci-preflight). Reported to EvalShift, not verified by it. Override only when the GitHub context doesn't describe the code you're actually evaluating. |
 
 Boolean inputs accept `1`, `true`, `yes`, `on` (case-insensitive). Anything else is false.
 
@@ -342,18 +344,21 @@ the action logs a warning and carries on rather than failing the run — the gat
 
 1. **Install.** `actions/setup-python` at `python-version`, then `pip install
    evalshift==<evalshift-version>`. No pip caching, so budget roughly 20–60 seconds.
-2. **Run.** `evalshift all --yes --config <config> --suite <suite>` in the workspace root.
+2. **Preflight.** Asks hosted EvalShift whether this job is covered by the org's plan, before
+   a single model call. A `402` stops the job here; anything else lets it continue. See
+   [Plan limits and the CI preflight](#plan-limits-and-the-ci-preflight).
+3. **Run.** `evalshift all --yes --config <config> --suite <suite>` in the workspace root.
    This is the full local pipeline: doctor → run → evaluate → analyze → report. Artifacts land
    in `.evalshift/runs/<run-id>/`, including the self-contained `report.html`.
-3. **Push.** `evalshift push <run-id>` uploads the run bundle to hosted EvalShift, creating the
+4. **Push.** `evalshift push <run-id>` uploads the run bundle to hosted EvalShift, creating the
    project if `create-project` allows it. Git metadata from the runner environment travels with
    the bundle so the server can pair this run with base-branch runs later.
-4. **Find a baseline.** Asks the hosted API for the latest compatible run on the base branch.
+5. **Find a baseline.** Asks the hosted API for the latest compatible run on the base branch.
    "Compatible" is a server-side judgement — a suite that changed shape can't be diffed against
    an older one.
-5. **Fetch the diff.** Pulls aggregate and per-slice deltas from the hosted API.
-6. **Report.** Writes the five outputs, upserts the PR comment, sets the commit status.
-7. **Gate.** Exits non-zero when `fail-on` says the diff is a regression.
+6. **Fetch the diff.** Pulls aggregate and per-slice deltas from the hosted API.
+7. **Report.** Writes the five outputs, upserts the PR comment, sets the commit status.
+8. **Gate.** Exits non-zero when `fail-on` says the diff is a regression.
 
 The action is a wrapper, not a reimplementation. All evaluation and statistics happen in the
 CLI; all cross-branch diffing happens server-side. If you want to understand what
@@ -419,6 +424,52 @@ config pointed at with `config:`.
 ```yaml
     if: github.event.pull_request.draft == false
 ```
+
+---
+
+## Plan limits and the CI preflight
+
+Hosted EvalShift plans limit a few things that CI runs into: private-repo CI, runs per month,
+and how many runs an org may have in flight at once. Discovering one of those halfway through a
+suite means paying for the model calls and getting nothing, so the action asks first.
+
+**What it does, before installing anything of yours or spending a credit:**
+
+1. Reads `project: <org>/<project>` from your config file — the same key `evalshift push` uses.
+2. Resolves that project through `GET /orgs/<org>/projects`.
+3. Calls `POST /projects/<id>/ci-preflight` with `{"repo_private": <bool>, "parallelism": 1}`.
+
+**A 402 fails the job immediately.** You get, in three places:
+
+- an `::error::` annotation at the top of the job,
+- a step summary block naming the plan, what was blocked, any limit and its reset date, and an
+  upgrade link,
+- on a pull request, the usual EvalShift comment (same marker, so it replaces the previous one)
+  carrying the same message.
+
+Every word of it comes from the server. The action never decides what a plan covers — it can't,
+and a client that guesses at entitlements is a client that tells people the wrong thing after
+the next pricing change.
+
+**Everything else is fail-open.** A 5xx, a timeout, a DNS failure, a project that doesn't exist
+yet, a token without `project:read` — all of them print `warning: plan preflight skipped: ...`
+and the run continues. Billing fails closed; infrastructure fails open. An EvalShift outage
+must not break your CI, and the server still enforces every limit when the run is uploaded, so
+nothing escapes by skipping the preflight.
+
+**The preflight is skipped entirely** when the config has no top-level `project:` key — there's
+nothing to resolve before the CLI builds the bundle.
+
+### About `repo-private`
+
+It defaults to `${{ github.event.repository.private }}` and is *asserted*, not verified: the
+server has no view of your GitHub repository. Two consequences worth knowing:
+
+- The server records the first `true` permanently. A project that has ever reported private
+  stays private, so reporting `false` afterwards changes nothing.
+- Overriding it to `false` on a private repository is a licence violation, not a clever trick.
+  If your workflow genuinely evaluates public code from a private repository, set it explicitly
+  and be prepared to explain it.
 
 ---
 
@@ -549,6 +600,12 @@ Worth knowing before you rely on this in anger:
   reads as a failed job.
 - **`fail-on` decides the exit code, not whether the run happened.** Even at `never`, the run
   executes, costs money, and pushes.
+- **The plan preflight reads `project:` with a regex, not a YAML parser.** The runtime helper
+  has no dependencies. A top-level `project: org/name` is found; anything more exotic isn't,
+  and the preflight is skipped rather than guessed at. The server still enforces the limit at
+  upload time.
+- **A denied preflight fails the job at `fail-on: never` too.** `fail-on` governs regressions;
+  a plan that doesn't cover the run is a different question, and the run never happens.
 
 ---
 
@@ -601,6 +658,19 @@ thresholds in the web app.
 
 Missing `pull-requests: write` / `issues: write`, or a fork PR with a read-only token. The
 gating still works — only the comment is lost.
+
+### The job failed before running anything, with a plan message
+
+The [CI preflight](#plan-limits-and-the-ci-preflight) got a `402`: the org's plan doesn't cover
+this run. The annotation and the step summary name the limit and link to the billing page. The
+usual cause is private-repo CI on a Free plan. Nothing was run and nothing was charged.
+
+### `warning: plan preflight skipped: ...`
+
+The preflight couldn't get an answer, so the run continued — the intended behavior. Common
+causes: the project doesn't exist on hosted EvalShift yet (the first push creates it), the
+token lacks `project:read`, or hosted EvalShift is unreachable. The server still enforces plan
+limits when the run is uploaded, so this warning never means a limit was bypassed.
 
 ### The check is always green
 

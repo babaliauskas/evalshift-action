@@ -53,6 +53,12 @@ inputs:
     description: Token used for PR comments and commit status.
     required: false
     default: ""
+  repo-private:
+    description: >-
+      Whether the repository is private. Defaults to the GitHub context; used for the
+      private-repo CI entitlement check. Reported to EvalShift, not verified by it.
+    required: false
+    default: ${{ github.event.repository.private }}
 
 outputs:
   run_url:
@@ -99,4 +105,5 @@ runs:
         INPUT_CREATE_PROJECT: ${{ inputs.create-project }}
         INPUT_COMMENT: ${{ inputs.comment }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token || github.token }}
+        INPUT_REPO_PRIVATE: ${{ inputs.repo-private }}
       run: python "$GITHUB_ACTION_PATH/scripts/evalshift_action.py"
