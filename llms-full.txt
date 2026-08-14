@@ -1,6 +1,6 @@
 # evalshift-action (GitHub Action) — complete reference for AI tools
 
-Canonical hosted copy: https://evalshift.dev/ci-llms-full.txt
+Canonical hosted copy: https://www.evalshift.dev/ci-llms-full.txt
 Repo/action ref: babaliauskas/evalshift-action | version: 0.1.0 | license: MIT
 Kind: composite GitHub Action (not JavaScript, not Docker)
 Marketplace name: "EvalShift" | branding: bar-chart-2 / purple
@@ -15,8 +15,8 @@ mode. The action is a thin CI wrapper: all evaluation, statistics, and reporting
 EvalShift CLI it installs; all diffing happens server-side in hosted EvalShift.
 
 Related packages (separate repos, separate docs):
-- evalshift (PyPI, the CLI this action installs and shells out to) — https://evalshift.dev/cli-llms-full.txt
-- evalshift-sdk (PyPI, in-process capture SDK) — https://evalshift.dev/sdk-llms-full.txt
+- evalshift (PyPI, the CLI this action installs and shells out to) — https://www.evalshift.dev/cli-llms-full.txt
+- evalshift-sdk (PyPI, in-process capture SDK) — https://www.evalshift.dev/sdk-llms-full.txt
 
 Minimal usage:
 ```yaml
