@@ -1,8 +1,16 @@
 # EvalShift GitHub Action
 
 Run your EvalShift golden suite on every pull request, push the result to hosted
-EvalShift, keep one PR comment up to date, and fail the check when the hosted
-diff shows a regression against the base branch.
+EvalShift, keep one PR comment up to date, and fail the check when your
+migration policy says the candidate is not safe to ship.
+
+> **Behaviour change — the default gate moved.** `fail-on` now defaults to
+> `policy`: hosted EvalShift judges the run against your project's migration
+> policy instead of the action counting regressions in the diff. A run that
+> regressed but stays inside your policy's budgets now passes, and a run that
+> busts a budget now fails even when the aggregate regression count is zero. Set
+> `fail-on: regression` to keep the old behaviour. See
+> [`fail-on` modes](#fail-on-modes).
 
 ## Quick start
 
@@ -31,7 +39,7 @@ jobs:
       - uses: babaliauskas/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
-          fail-on: regression
+          fail-on: policy # the default; gates on your migration policy
 ```
 
 You need two things in repository secrets: `EVALSHIFT_TOKEN` for hosted
@@ -156,7 +164,7 @@ confirmation prompt, which has no answer on a runner.
 | `suite`             | no       | `golden.jsonl`              | Path to the golden JSONL suite, relative to the repository root. |
 | `evalshift-version` | no       | `0.11.0`                     | Exact EvalShift CLI version to install from PyPI. Pin this if you want run-to-run reproducibility across CLI releases. |
 | `python-version`    | no       | `3.14`                      | Python version used to install and run the CLI. |
-| `fail-on`           | no       | `regression`                | Gating mode. See below. |
+| `fail-on`           | no       | `policy`                    | Gating mode. See below. |
 | `branch`            | no       | auto                        | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. Override only when your branch naming differs from the git ref. |
 | `base-branch`       | no       | auto                        | Branch to look for a baseline run on. Auto-detected from the PR base ref, else the current ref. If this resolves to empty, no baseline is fetched and the check always passes. |
 | `create-project`    | no       | `true`                      | Whether `evalshift push` may auto-create the hosted project when it does not exist yet. Set `false` to make a missing project a hard failure instead. |
@@ -168,13 +176,38 @@ confirmation prompt, which has no answer on a runner.
 
 | Mode                   | Job fails when |
 | ---------------------- | -------------- |
+| `policy`               | Hosted EvalShift evaluates the run against your project's migration policy and answers `fail`. **This is the default.** |
 | `never`                | Never. Records the run and reports, but never blocks the merge. Use while you are still calibrating a suite. |
-| `regression`           | The hosted diff reports one or more regressed examples in aggregate. This is the default. |
+| `regression`           | The hosted diff reports one or more regressed examples in aggregate. |
 | `any-slice-regression` | Any slice's pass rate moved down, even when the aggregate is flat or improved. Stricter — catches a specific slice degrading while overall numbers hide it. |
 
+`policy` is the only mode that gates on what you actually configured. The other
+three ask the action's own question about the diff, which can disagree with your
+policy in both directions. The decision comes from
+`GET /runs/{id}/policy-check`, so the CLI, the web app and this check all
+enforce one policy — the action never re-implements a threshold.
+
+The policy answers with one of four statuses. Only one of them fails the job:
+
+| Status | Gate | What it means |
+| ------ | ---- | ------------- |
+| `pass` | merges | Every budget is within policy. |
+| `conditional_pass` | merges | Every budget held and nothing critical or high regressed, but medium/low regressions and/or comparisons that scored zero pairs came with it. A pass with caveats — deliberately **not** a gate failure. The comment says so and prints the server's reason; read it before merging. |
+| `fail` | **blocks** | A budget was busted, or a critical/high regression is blocking. |
+| `inconclusive` | merges | The policy could not decide. Never rendered as a pass — the comment and the commit status say the gate did not decide. Three different causes produce this, and only the server's `reason` string tells them apart, so the action prints that reason verbatim rather than paraphrasing it. |
+
+Any status outside those four is something a newer server grew that this pinned
+version of the action has never seen. It is handled like `inconclusive`: it does
+not fail the job, and it is never rendered as a pass.
+
+If the policy check itself is unreachable, 404s, or has no stored decision for
+the run, the action does not quietly go green. It falls back to `regression`
+gating for that run and says so in the log, the commit status and the PR
+comment.
+
 When no compatible baseline run exists on the base branch, there is nothing to
-compare against: the check passes, `regression_count` is `0`, and the PR comment
-says so explicitly.
+compare against: the diff-based modes pass, `regression_count` is `0`, and the
+PR comment says so explicitly. `policy` still asks the server for a verdict.
 
 ## Outputs
 
@@ -184,7 +217,7 @@ says so explicitly.
 | `diff_url`         | Hosted diff URL comparing this run to the baseline. Empty string when no compatible baseline was found. |
 | `run_id`           | EvalShift run id, usable with `evalshift` CLI commands locally. |
 | `regression_count` | Number of regressed examples in the hosted diff. `0` when there is no baseline. |
-| `conclusion`       | `success` or `failure`, reflecting `fail-on`. |
+| `conclusion`       | `success` or `failure`, reflecting `fail-on`. A policy that declined to decide is a `success` here — read the PR comment or the commit status for the verdict itself. |
 
 Consume them from a later step:
 
@@ -217,11 +250,12 @@ run — the gate still works.
 3. Runs `evalshift all --yes` against your config and suite, writing run state to
    `.evalshift/runs` in the workspace.
 4. Pushes the completed run to hosted EvalShift, creating the project if needed.
-5. Asks the hosted API for a compatible baseline run on the base branch and
-   fetches the diff.
+5. Asks the hosted API for a compatible baseline run on the base branch,
+   fetches the diff, and — under `fail-on: policy` — asks the server to judge
+   the run against the project's migration policy.
 6. Writes the outputs, upserts a single PR comment (marked so it updates in place
    instead of stacking), and sets the `evalshift/regression` commit status.
-7. Exits non-zero when `fail-on` says the diff is a regression.
+7. Exits non-zero when the gate says so — the hosted policy verdict under `fail-on: policy`, the diff otherwise.
 
 ## Plan limits
 

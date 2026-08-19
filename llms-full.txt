@@ -9,9 +9,9 @@ Runtime helper: scripts/evalshift_action.py (stdlib only, no third-party deps)
 Purpose: check the org's plan covers this job before spending credits, run an EvalShift golden
 suite inside CI, push the completed run to hosted EvalShift,
 ask the hosted API for a compatible baseline run on the base branch, fetch the hosted diff,
+ask the hosted governed gate to judge the run against the project's migration policy,
 write action outputs, keep exactly one PR comment up to date, set the `evalshift/regression`
-commit status, and exit non-zero when the diff is a regression under the selected `fail-on`
-mode. The action is a thin CI wrapper: all evaluation, statistics, and reporting happen in the
+commit status, and exit non-zero when the selected `fail-on` mode says to. The action is a thin CI wrapper: all evaluation, statistics, and reporting happen in the
 EvalShift CLI it installs; all diffing happens server-side in hosted EvalShift.
 
 Related packages (separate repos, separate docs):
@@ -36,7 +36,7 @@ jobs:
       - uses: babaliauskas/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
-          fail-on: regression
+          fail-on: policy   # the default
 ```
 
 Prerequisites in the repository, all of them hard requirements:
@@ -78,7 +78,7 @@ log until it completes.
 | suite | no | golden.jsonl | Path to golden JSONL suite, relative to workspace root. |
 | evalshift-version | no | 0.11.0 | Exact CLI version installed from PyPI. Pinned for reproducibility. |
 | python-version | no | 3.14 | Python for the CLI. Must satisfy the CLI's `requires-python` (>=3.14 for 0.11.0); lowering it breaks install. |
-| fail-on | no | regression | `never` \| `regression` \| `any-slice-regression`. Any other value → hard error before any work. |
+| fail-on | no | policy | `policy` \| `never` \| `regression` \| `any-slice-regression`. Any other value → hard error before any work. DEFAULT CHANGED: was `regression`; `policy` gates on the server's migration-policy verdict, not on the diff. |
 | branch | no | "" (auto) | Candidate branch recorded on the hosted run. Auto-detected; override only for non-standard naming. |
 | base-branch | no | "" (auto) | Branch searched for a baseline run. Auto-detected. If it resolves empty, no baseline lookup happens at all and the check passes. |
 | create-project | no | true | When false, appends `--no-create-project` to `evalshift push`, making a missing hosted project a hard failure. |
@@ -97,7 +97,7 @@ false. All inputs are `.strip()`ed.
 | diff_url | Hosted `web_diff_url` for the baseline comparison; empty string when no compatible baseline. |
 | run_id | Local/hosted run id (e.g. `r_20260723_myssuite_ab12cd`). |
 | regression_count | `aggregate_delta.regressions` from the hosted diff; `0` when no baseline. |
-| conclusion | `success` or `failure`, after applying `fail-on`. |
+| conclusion | `success` or `failure`, after applying `fail-on`. It is a GitHub commit-status state, so both a `conditional_pass` and an undecided policy (`inconclusive` or an unknown status) read `success` here; the PR comment and the status description carry the verdict. |
 
 Written by appending `key=value` lines to `$GITHUB_OUTPUT`. Values are single-line by
 construction; there is no heredoc delimiter handling, so a hypothetical multi-line value would
@@ -182,13 +182,53 @@ stdlib `urllib`. The preflight calls above use the same client and headers.
    }
    ```
    Any other key is ignored. Non-object response → hard error.
+3. `GET {host}/runs/{run_id}/policy-check` — the governed gate. Called ONLY when
+   `fail-on: policy`, always for the run just pushed, independent of whether a baseline exists.
+   ```json
+   {
+     "run_id": "...",
+     "status": "pass" | "conditional_pass" | "fail" | "inconclusive",
+     "verdict": "<string>" | null,
+     "reason": "<string>",
+     "policy_source": "project_policy" | "default_policy",
+     "policy": { ... },
+     "budgets": [{"name": "...", "observed": <float>, "allowed": <float>, "passed": <bool>,
+                  "scope": "...", "ci_low": <float|null>, "ci_high": <float|null>,
+                  "conclusive": <bool>}],
+     "blocking_regressions": [{"prompt_id": "...", "evaluator_name": "...", "slice_name": "...",
+                               "severity": "...", "delta_avg_score": <float>,
+                               "effect_size": <float>}]
+   }
+   ```
+   `status` is a CLOSED set of four, and the action recognises all four:
+   - `pass` — every budget within policy.
+   - `conditional_pass` — every budget held and nothing critical/high regressed, but medium/low
+     regressions and/or comparisons that scored zero pairs. A PASSING state with caveats; it
+     deliberately does not fail the gate. Its `reason` contains "not a gate failure" and ends
+     "Review before merging."
+   - `fail` — a budget busted, or a blocking critical/high regression.
+   - `inconclusive` — three distinct causes, distinguishable ONLY by `reason`: (1) no policy
+     metrics recorded for the run; (2) nothing comparable — every comparison scored severity
+     `insufficient`, which also returns `budgets: []`; (3) a policy-declared slice went
+     unmeasured. The action prints `reason` verbatim and never paraphrases it, or the three
+     collapse into one on the surface readers see.
+   A string outside those four means a newer server; the action treats it exactly like
+   `inconclusive` (undecided, never a pass) so a pinned version keeps working.
+   `budgets[]` may exceed six entries and `scope` may be a slice name rather than `overall`; it
+   is `[]` for the all-`insufficient` case.
+
+   Never raises out of `fetch_policy_check` — HTTPError (any code),
+   URLError, a wrapped 403 `ActionError`, a malformed body, or a response whose `status` is
+   missing/blank all return `(None, reason)` and print
+   `warning: <reason>; falling back to fail-on: regression` to stderr.
 
 `target_url` for the commit status = `web_diff_url` when present, else `run_url`.
 
 ## Gating algorithm (exact)
 
 ```
-diff is None                      -> conclusion=success, should_fail=False, regression_count=0
+# Diff facts, computed in every mode (the comment renders them even when they do not gate).
+diff is None                      -> regression_count=0, slice_regressions=[]
 regression_count = int(aggregate_delta.regressions or 0)
 slice_regressions = [s for s in per_slice_deltas if float(s.pass_rate_delta) < 0]
                     sorted ascending by pass_rate_delta   # most negative first
@@ -197,12 +237,45 @@ top_slice_regressions = slice_regressions[:5]             # comment display only
 fail_on == "never"                -> should_fail = False
 fail_on == "regression"           -> should_fail = regression_count > 0
 fail_on == "any-slice-regression" -> should_fail = len(slice_regressions) > 0
+
+fail_on == "policy":                                      # the default
+  policy-check unavailable        -> should_fail = regression_count > 0   # fallback, announced
+  status == "fail"                -> should_fail = True
+  status == "pass"                -> should_fail = False
+  status == "conditional_pass"    -> should_fail = False, reported as a PASS with caveats
+  status == "inconclusive"        -> should_fail = False, reported as undecided
+  any other status                -> should_fail = False, reported as unrecognized/undecided
+
 conclusion = "failure" if should_fail else "success"
 ```
 Non-numeric / missing deltas coerce to `0.0`, so a malformed slice entry is treated as "flat",
 never as a regression. `any-slice-regression` is strictly not a superset of `regression`: a run
 with `regressions > 0` but no negative slice delta fails under `regression` and passes under
 `any-slice-regression`.
+
+`policy` is not a stricter or looser version of `regression` either — it is the server's
+verdict on the project's migration policy and can disagree in both directions: a diff with
+regressions that stay inside every budget passes, and a diff with `regressions == 0` that busts
+a cost/latency/per-slice budget fails.
+
+Undecided is never a pass and never a failure: `should_fail=False`, `conclusion=success` (the
+only GitHub states are success/failure), and `GatingResult.summary` — surfaced in the commit
+status description and the PR comment — says the gate could not decide, naming the unrecognized
+status when there is one. An unavailable policy check gates on the diff for that run and is
+announced in the job log, the status description and the comment; it never silently goes green.
+
+`conditional_pass` is NOT undecided. `GatingResult.policy_decided` is True for it (the set is
+`POLICY_DECIDED_STATUSES = {"pass", "conditional_pass", "fail"}`) and
+`GatingResult.policy_caveated` is True only for it
+(`POLICY_CAVEATED_STATUSES = {"conditional_pass"}`). `summary` reads
+`the <policy_source> gate passed, with caveats: <reason>`, and the PR comment renders a
+"passed, with caveats" blockquote instead of the "could not decide" one.
+
+`GatingResult` fields: `conclusion`, `should_fail`, `regression_count`, `top_slice_regressions`,
+`mode`, `summary`, `policy_status`, `policy_verdict`, `policy_reason`, `policy_source`,
+`budgets`, `blocking_regressions`, `policy_unavailable_reason`, plus the derived
+`policy_decided` (`policy_status in {"pass","conditional_pass","fail"}`) and `policy_caveated`
+(`policy_status in {"conditional_pass"}`).
 
 Process exit code: `1` when `should_fail`, `1` on any `ActionError` (printed as `error: <msg>`
 to stderr), else `0`.
@@ -250,7 +323,29 @@ No compatible baseline run was found on the base branch.
 ```
 Body shape (with baseline) replaces the trailing line with a `**Diff:**` link (when
 `web_diff_url` exists), a `**Pass-rate movement:**` line, and a two-column table of up to five
-regressed slices, or the single row `| No regressed slices | 0 pts |`. Percent formatting is
+regressed slices, or the single row `| No regressed slices | 0 pts |`.
+
+Under `fail-on: policy` only, two extra sections sit between the header lines and the diff
+sections (they render with or without a baseline):
+- `**Policy decision:** \`<status>\` (from \`<policy_source>\`)` + `**Why:** <reason>`, where
+  `<reason>` is the server's string verbatim (whitespace-collapsed only). On
+  `conditional_pass`, a blockquote states the gate "passed, with caveats" and points at the
+  reason. On `inconclusive` or an unrecognized status, a blockquote states that the gate could
+  not decide and that this is not a pass. When the check was unavailable, the whole pair is
+  replaced by a blockquote naming the reason and the `fail-on: regression` fallback.
+- `### Policy budgets` — `| Budget | Scope | Observed | Allowed | Result |`, failing rows first,
+  capped at `MAX_BUDGET_ROWS = 12`, then `<n> more budgets not shown — see the hosted run.`,
+  or `<n> more budgets not shown, <k> of them failing — see the hosted run.` when the hidden
+  rows include failures (per-slice budgets can produce more failures than fit). `Scope` is
+  `overall` or the slice name. Result is `pass`/`fail`/`unknown`, with ` (not confident)`
+  appended when `conclusive` is `false`. Numbers format as `f"{v:.4g}"`; a non-numeric or
+  absent value reads `n/a`. Omitted entirely when `budgets` is `[]` — the all-`insufficient`
+  case renders no table at all rather than an empty one.
+- `### Blocking regressions` — `| Prompt | Evaluator | Slice | Severity | Score delta |`, capped
+  at `MAX_BLOCKING_ROWS = 10`, then `<n> more blocking regressions not shown — see the hosted
+  run.`
+Server-supplied strings in these tables are collapsed to one line and `|` is escaped, so a
+budget or slice name cannot break the table. Percent formatting is
 `round(value * 100)` with a `+` prefix only when positive, suffixed ` pts` — e.g. `-20 pts`,
 `+5 pts`, `0 pts`. Rounding is display-only; gating uses raw floats.
 
@@ -260,7 +355,9 @@ regressed slices, or the single row `| No regressed slices | 0 pts |`. Percent f
 - `context`: `evalshift/regression` (constant — parallel invocations overwrite each other)
 - `state`: `success` | `failure` (mirrors `conclusion`)
 - `target_url`: `web_diff_url` or `run_url`
-- `description`: `EvalShift <conclusion>: <n> regression(s)`, truncated to 140 chars
+- `description`: `EvalShift <conclusion>: <summary>`, truncated to 140 chars. `<summary>` is
+  the policy sentence under `fail-on: policy` (verdict, source, reason, or the fallback
+  notice); `<n> regression(s)` in every other mode.
 Set on every event where `github-token` is non-empty, including `push`. 403/404 → warning
 `warning: could not set commit status: HTTP <code>` and continue; other HTTP errors fail.
 
@@ -344,7 +441,7 @@ the env var covers any other prompt a CLI release adds.
 - Missing `token` → `input 'token' is required`, exit 1. Validation happens in the helper, i.e.
   AFTER the composite has already installed Python and the CLI — a misconfigured workflow still
   burns install time, but never model credits.
-- Invalid `fail-on` → `input 'fail-on' must be one of: never, regression, any-slice-regression`.
+- Invalid `fail-on` → `input 'fail-on' must be one of: never, regression, any-slice-regression, policy`.
 - A denied preflight fails the job regardless of `fail-on`, including `never`: `fail-on`
   governs regressions, not whether the plan permits the run at all.
 - The action never decides what a plan covers. It renders the server's 402 message, details and
@@ -487,8 +584,13 @@ token without `project:read`, hosted API unreachable). Intended: the run continu
 server enforces the limit at upload.
 `warning: could not upsert PR comment: HTTP 403` → missing `pull-requests: write` /
 `issues: write`, or a fork PR with a read-only `GITHUB_TOKEN`. Gate still works.
-Check always green → no compatible baseline on the base branch yet (expected on the first PR),
-or `fail-on: never`, or `base-branch` resolved empty.
+Check always green → the project's migration policy is permissive enough that no budget was
+busted (default `fail-on: policy`; the comment shows the budget arithmetic), or no compatible
+baseline on the base branch yet (expected on the first PR), or `fail-on: never`, or
+`base-branch` resolved empty.
+`warning: hosted policy check ...; falling back to fail-on: regression` → the policy-check
+endpoint errored, 404'd, or holds no decision for the run; the job gated on the diff instead
+and the PR comment says so. A persistent 404 usually means the project has no migration policy.
 Two comments on one PR → two action invocations, or the marker comment fell off page 1 of the
 comments API.
 Job is silent for minutes → output is captured and printed per command, not streamed.

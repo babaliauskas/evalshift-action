@@ -14,7 +14,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -25,6 +25,31 @@ COMMENT_MARKER = "<!-- evalshift:comment -->"
 STATUS_CONTEXT = "evalshift/regression"
 DEFAULT_HOST = "https://api.evalshift.dev"
 DEFAULT_EVALSHIFT_VERSION = "0.11.0"
+
+FAIL_ON_MODES = ("never", "regression", "any-slice-regression", "policy")
+DEFAULT_FAIL_ON = "policy"
+
+# What `policy` degrades to when hosted EvalShift cannot supply a decision. Never `never`:
+# an unreachable policy endpoint must not be a way to merge a regression unnoticed.
+POLICY_FALLBACK_MODE = "regression"
+
+# The server's status vocabulary is a closed set of four: `pass`, `conditional_pass`, `fail`,
+# `inconclusive`. Three of them are a decision the action can act on; `inconclusive` is not.
+# Anything outside the set is something a future server grew and this action has never seen —
+# handled as undecided further down, so an action pinned in a workflow keeps behaving.
+POLICY_DECIDED_STATUSES = frozenset({"pass", "conditional_pass", "fail"})
+
+# Decided, passing, and still not clean. `conditional_pass` means every budget held and nothing
+# critical or high regressed, but something milder did — medium/low regressions, or comparisons
+# that scored zero pairs. It deliberately does not fail the gate; it does ask for a human look,
+# and the `reason` is where the server says what to look at.
+POLICY_CAVEATED_STATUSES = frozenset({"conditional_pass"})
+
+# A PR comment is not a dashboard. A policy with a per-slice budget for fifty slices would
+# otherwise bury the diff under its own table.
+MAX_BUDGET_ROWS = 12
+MAX_BLOCKING_ROWS = 10
+MAX_SLICE_ROWS = 5
 
 # One EvalShift run per job. A matrix asks once per job, and the server counts the
 # in-flight runs itself, so declaring anything larger here would be a guess.
@@ -74,11 +99,9 @@ class ActionConfig:
         token = _input(source, "TOKEN")
         if not token:
             raise ActionError("input 'token' is required")
-        fail_on = _input(source, "FAIL_ON", "regression")
-        if fail_on not in {"never", "regression", "any-slice-regression"}:
-            raise ActionError(
-                "input 'fail-on' must be one of: never, regression, any-slice-regression"
-            )
+        fail_on = _input(source, "FAIL_ON", DEFAULT_FAIL_ON)
+        if fail_on not in FAIL_ON_MODES:
+            raise ActionError(f"input 'fail-on' must be one of: {', '.join(FAIL_ON_MODES)}")
         return cls(
             token=token,
             host=_input(source, "HOST", DEFAULT_HOST).rstrip("/"),
@@ -120,10 +143,40 @@ class EvalShiftRunResult:
 
 @dataclass(frozen=True)
 class GatingResult:
+    """The gate's decision, plus everything the PR comment needs to justify it.
+
+    ``conclusion`` stays one of GitHub's commit-status states (``success`` / ``failure``) — it
+    is sent to the statuses API verbatim. When the governed policy declines to decide, the job
+    does not fail, and ``summary`` is where that is said out loud.
+    """
+
     conclusion: str
     should_fail: bool
     regression_count: int
     top_slice_regressions: list[dict[str, Any]]
+    # `fail-on` as configured. Kept even on the fallback path, so the comment can explain that
+    # `policy` was asked for and something else was used.
+    mode: str = "regression"
+    # One plain sentence about how the gate reached its decision. Empty in the diff-only modes,
+    # where the conclusion and the regression count already say everything there is to say.
+    summary: str = ""
+    policy_status: str = ""
+    policy_verdict: str = ""
+    policy_reason: str = ""
+    policy_source: str = ""
+    budgets: list[dict[str, Any]] = field(default_factory=list)
+    blocking_regressions: list[dict[str, Any]] = field(default_factory=list)
+    policy_unavailable_reason: str = ""
+
+    @property
+    def policy_decided(self) -> bool:
+        """Whether the policy returned a status this action knows how to act on."""
+        return self.policy_status in POLICY_DECIDED_STATUSES
+
+    @property
+    def policy_caveated(self) -> bool:
+        """Whether the policy passed the run but attached something worth reading first."""
+        return self.policy_status in POLICY_CAVEATED_STATUSES
 
 
 class ActionError(Exception):
@@ -167,6 +220,17 @@ class HostedClient:
         data = self._get(api_diff_url)
         if not isinstance(data, dict):
             raise ActionError("hosted diff response was not an object")
+        return data
+
+    def policy_check(self, run_id: str) -> dict[str, Any]:
+        """The governed gate's decision for ``run_id``, evaluated against the project's policy.
+
+        The action never re-implements the policy; the server owns thresholds, budgets and
+        statistics, and this is the one place that judgement is read from.
+        """
+        data = self._get(f"/runs/{quote(run_id)}/policy-check")
+        if not isinstance(data, dict):
+            raise ActionError("hosted policy-check response was not an object")
         return data
 
     def find_project_id(self, org_slug: str, project_slug: str) -> str | None:
@@ -604,19 +668,67 @@ def extract_url(output: str) -> str:
     return ""
 
 
-def evaluate_gating(diff: dict[str, Any] | None, fail_on: str) -> GatingResult:
-    if diff is None:
-        return GatingResult("success", False, 0, [])
-    aggregate = _dict_field(diff, "aggregate_delta")
+def fetch_policy_check(hosted: Any, run_id: str) -> tuple[dict[str, Any] | None, str]:
+    """The governed decision for ``run_id``, or ``(None, reason)`` when there is not one.
+
+    Deliberately never raises. A policy endpoint that 404s, times out, or answers without a
+    decision is a real condition the caller has to degrade through — but degrading into a
+    silent green check is how a regression merges. The reason travels back so the fallback can
+    be named in the log, the commit status and the PR comment.
+    """
+    try:
+        payload = hosted.policy_check(run_id)
+    except HTTPError as exc:
+        reason = (
+            "this run has no stored policy decision (HTTP 404)"
+            if exc.code == 404
+            else f"hosted policy check returned HTTP {exc.code}"
+        )
+    # OSError covers URLError; ActionError covers a wrapped 403; ValueError a malformed body.
+    except (OSError, ValueError, ActionError) as exc:
+        reason = f"hosted policy check failed: {exc}"
+    else:
+        if str(payload.get("status") or "").strip():
+            return payload, ""
+        reason = "hosted policy check returned no decision for this run"
+    print(
+        f"warning: {reason}; falling back to fail-on: {POLICY_FALLBACK_MODE}",
+        file=sys.stderr,
+    )
+    return None, reason
+
+
+def evaluate_gating(
+    diff: dict[str, Any] | None,
+    fail_on: str,
+    *,
+    policy: dict[str, Any] | None = None,
+    policy_unavailable: str = "",
+) -> GatingResult:
+    """Decide whether this job fails, and record why.
+
+    In every mode but ``policy`` the diff decides. In ``policy`` the diff is still reported —
+    the comment renders it — but the governed server gate is what the exit code follows.
+    """
+    aggregate = _dict_field(diff or {}, "aggregate_delta")
     regression_count = int(aggregate.get("regressions") or 0)
-    slices = _list_field(diff, "per_slice_deltas")
-    slice_regressions = [
-        item
-        for item in slices
-        if isinstance(item, dict) and _float(item.get("pass_rate_delta")) < 0
-    ]
-    slice_regressions.sort(key=lambda item: _float(item.get("pass_rate_delta")))
-    top_slice_regressions = slice_regressions[:5]
+    slices = _list_field(diff or {}, "per_slice_deltas")
+    slice_regressions = sorted(
+        (
+            item
+            for item in slices
+            if isinstance(item, dict) and _float(item.get("pass_rate_delta")) < 0
+        ),
+        key=lambda item: _float(item.get("pass_rate_delta")),
+    )
+    top_slice_regressions = slice_regressions[:MAX_SLICE_ROWS]
+    if fail_on == "policy":
+        return _policy_gating(
+            policy,
+            policy_unavailable,
+            regression_count=regression_count,
+            top_slice_regressions=top_slice_regressions,
+        )
     should_fail = False
     if fail_on == "regression":
         should_fail = regression_count > 0
@@ -627,11 +739,98 @@ def evaluate_gating(diff: dict[str, Any] | None, fail_on: str) -> GatingResult:
         should_fail=should_fail,
         regression_count=regression_count,
         top_slice_regressions=top_slice_regressions,
+        mode=fail_on,
+    )
+
+
+def _policy_gating(
+    policy: dict[str, Any] | None,
+    policy_unavailable: str,
+    *,
+    regression_count: int,
+    top_slice_regressions: list[dict[str, Any]],
+) -> GatingResult:
+    """Turn a ``policy-check`` response into a gate decision, or degrade loudly without one."""
+    if policy is None:
+        reason = policy_unavailable or "hosted EvalShift returned no policy decision"
+        should_fail = regression_count > 0
+        return GatingResult(
+            conclusion="failure" if should_fail else "success",
+            should_fail=should_fail,
+            regression_count=regression_count,
+            top_slice_regressions=top_slice_regressions,
+            mode="policy",
+            summary=(
+                f"policy check unavailable — {reason}; "
+                f"fell back to fail-on: {POLICY_FALLBACK_MODE}"
+            ),
+            policy_unavailable_reason=reason,
+        )
+    status = str(policy.get("status") or "").strip().lower()
+    policy_reason = _text(policy.get("reason"))
+    source = _text(policy.get("policy_source")) or "the project's policy"
+    if status == "fail":
+        should_fail = True
+        summary = f"the {source} gate failed"
+    elif status == "pass":
+        should_fail = False
+        summary = f"the {source} gate passed"
+    elif status == "conditional_pass":
+        # A pass, not a non-answer: budgets held and nothing critical or high regressed. The
+        # caveat is real enough to say out loud and not real enough to fail a merge on.
+        should_fail = False
+        summary = f"the {source} gate passed, with caveats"
+    elif status == "inconclusive":
+        should_fail = False
+        summary = f"the {source} gate could not decide (inconclusive); not failing the job"
+    else:
+        # An open status set: the server grows new verdicts, and an older action pinned in a
+        # workflow still has to behave. Unknown is undecided, never a pass.
+        should_fail = False
+        summary = (
+            f"the {source} gate returned an unrecognized status '{status or 'missing'}'; "
+            "treated as undecided, not as a pass"
+        )
+    if policy_reason:
+        summary = f"{summary}: {policy_reason}"
+    return GatingResult(
+        conclusion="failure" if should_fail else "success",
+        should_fail=should_fail,
+        regression_count=regression_count,
+        top_slice_regressions=top_slice_regressions,
+        mode="policy",
+        summary=summary,
+        policy_status=status,
+        policy_verdict=_text(policy.get("verdict")),
+        policy_reason=policy_reason,
+        policy_source=_text(policy.get("policy_source")),
+        budgets=[item for item in _list_field(policy, "budgets") if isinstance(item, dict)],
+        blocking_regressions=[
+            item for item in _list_field(policy, "blocking_regressions") if isinstance(item, dict)
+        ],
     )
 
 
 def _float(value: Any) -> float:
     return float(value) if isinstance(value, int | float) else 0.0
+
+
+def _text(value: Any) -> str:
+    """A server-supplied string, flattened to one line so it cannot break a status or a table."""
+    return " ".join(str(value).split()) if isinstance(value, str) else ""
+
+
+def _cell(value: Any, default: str = "—") -> str:
+    """``value`` as a markdown table cell: one line, with the column separator neutralised."""
+    text = _text(value)
+    return text.replace("|", "\\|") if text else default
+
+
+def _metric(value: Any) -> str:
+    """A budget number for display. Non-numeric — including a missing bound — reads ``n/a``."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return "n/a"
+    return f"{value:.4g}"
 
 
 def build_comment_body(
@@ -652,6 +851,7 @@ def build_comment_body(
     ]
     if diff_url:
         lines.append(f"**Diff:** [compare to baseline]({diff_url})")
+    lines.extend(_policy_sections(gating))
     if baseline is None or diff is None:
         lines.extend(["", "No compatible baseline run was found on the base branch."])
         return "\n".join(lines)
@@ -671,10 +871,117 @@ def build_comment_body(
     else:
         for item in gating.top_slice_regressions:
             lines.append(
-                f"| {item.get('slice', 'uncategorized')} | "
+                f"| {_cell(item.get('slice'), 'uncategorized')} | "
                 f"{_format_percent_delta(_float(item.get('pass_rate_delta')))} |"
             )
     return "\n".join(lines)
+
+
+def _policy_sections(gating: GatingResult) -> list[str]:
+    """The governed decision, its budgets and its blocking regressions, as markdown.
+
+    Empty in the diff-only modes: nothing asked the server for a policy, so there is nothing
+    honest to render.
+    """
+    if gating.mode != "policy":
+        return []
+    if gating.policy_unavailable_reason:
+        return [
+            "",
+            f"> **The policy gate did not run** — {gating.policy_unavailable_reason}.",
+            f"> This check fell back to `fail-on: {POLICY_FALLBACK_MODE}`, so it reflects the "
+            "diff alone — not your migration policy.",
+            "",
+        ]
+    lines = ["", f"**Policy decision:** `{gating.policy_status or 'missing'}`"]
+    if gating.policy_source:
+        lines[-1] += f" (from `{gating.policy_source}`)"
+    if gating.policy_reason:
+        lines.append(f"**Why:** {gating.policy_reason}")
+    if gating.policy_caveated:
+        lines.extend(
+            [
+                "",
+                "> **The policy gate passed, with caveats.** Every budget held and nothing "
+                "critical or high regressed, so this is not a gate failure — but the run is "
+                "not clean either. Read the reason above before merging.",
+            ]
+        )
+    elif not gating.policy_decided:
+        lines.extend(
+            [
+                "",
+                "> **The policy gate could not decide.** This check is not a pass — the "
+                "migration policy reached no verdict, and the job was not failed on a "
+                "non-answer.",
+            ]
+        )
+    lines.extend(_budget_table(gating.budgets))
+    lines.extend(_blocking_regression_table(gating.blocking_regressions))
+    # A trailing blank keeps whatever the caller appends next off the last table row.
+    lines.append("")
+    return lines
+
+
+def _budget_table(budgets: list[dict[str, Any]]) -> list[str]:
+    if not budgets:
+        return []
+    # Failing budgets first: the cap must never be what hides the reason the job went red.
+    ordered = [item for item in budgets if item.get("passed") is False]
+    ordered += [item for item in budgets if item.get("passed") is not False]
+    shown = ordered[:MAX_BUDGET_ROWS]
+    lines = [
+        "",
+        "### Policy budgets",
+        "",
+        "| Budget | Scope | Observed | Allowed | Result |",
+        "| --- | --- | ---: | ---: | --- |",
+    ]
+    for budget in shown:
+        passed = budget.get("passed")
+        result = "pass" if passed else ("fail" if passed is False else "unknown")
+        # `conclusive: false` means the interval is too wide to tell — say so rather than let
+        # a coin-flip render as a clean pass.
+        if budget.get("conclusive") is False:
+            result += " (not confident)"
+        lines.append(
+            f"| {_cell(budget.get('name'))} | {_cell(budget.get('scope'))} | "
+            f"{_metric(budget.get('observed'))} | {_metric(budget.get('allowed'))} | {result} |"
+        )
+    hidden = ordered[len(shown) :]
+    if hidden:
+        # Per-slice budgets (a policy with slice overrides emits one row per slice) can push
+        # more failures past the cap than fit above it. A bare count would read as "the rest
+        # were fine", which is the exact misreading this table exists to prevent.
+        hidden_failures = sum(1 for item in hidden if item.get("passed") is False)
+        note = f"{len(hidden)} more budgets not shown"
+        if hidden_failures:
+            note += f", {hidden_failures} of them failing"
+        lines.extend(["", f"{note} — see the hosted run."])
+    return lines
+
+
+def _blocking_regression_table(regressions: list[dict[str, Any]]) -> list[str]:
+    if not regressions:
+        return []
+    shown = regressions[:MAX_BLOCKING_ROWS]
+    lines = [
+        "",
+        "### Blocking regressions",
+        "",
+        "| Prompt | Evaluator | Slice | Severity | Score delta |",
+        "| --- | --- | --- | --- | ---: |",
+    ]
+    for item in shown:
+        lines.append(
+            f"| {_cell(item.get('prompt_id'))} | {_cell(item.get('evaluator_name'))} | "
+            f"{_cell(item.get('slice_name'), 'uncategorized')} | {_cell(item.get('severity'))} | "
+            f"{_metric(item.get('delta_avg_score'))} |"
+        )
+    omitted = len(regressions) - len(shown)
+    if omitted:
+        lines.extend(["", f"{omitted} more blocking regressions not shown — see the hosted run."])
+    return lines
 
 
 def _format_percent_delta(value: float) -> str:
@@ -708,16 +1015,14 @@ def set_commit_status(
     *,
     target_url: str,
 ) -> None:
+    detail = gating.summary or f"{gating.regression_count} regression(s)"
     try:
         github.create_status(
             context.repository,
             context.sha,
             state=gating.conclusion,
             target_url=target_url,
-            description=(
-                f"EvalShift {gating.conclusion}: "
-                f"{gating.regression_count} regression(s)"
-            ),
+            description=f"EvalShift {gating.conclusion}: {detail}",
             context=STATUS_CONTEXT,
         )
     except HTTPError as exc:
@@ -787,7 +1092,18 @@ def main() -> int:
         api_diff_url = baseline_payload.get("api_diff_url") if baseline_payload else None
         web_diff_url = baseline_payload.get("web_diff_url") if baseline_payload else None
         diff = hosted.run_diff(str(api_diff_url)) if api_diff_url else None
-        gating = evaluate_gating(diff, config.fail_on)
+        policy: dict[str, Any] | None = None
+        policy_unavailable = ""
+        if config.fail_on == "policy":
+            policy, policy_unavailable = fetch_policy_check(hosted, run.run_id)
+        gating = evaluate_gating(
+            diff,
+            config.fail_on,
+            policy=policy,
+            policy_unavailable=policy_unavailable,
+        )
+        if gating.summary:
+            print(f"EvalShift gate: {gating.summary}")
         target_url = str(web_diff_url or run.run_url)
         write_outputs(
             {

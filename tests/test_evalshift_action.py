@@ -281,6 +281,526 @@ def test_evaluate_gating_passes_without_baseline() -> None:
     assert result.top_slice_regressions == []
 
 
+def _policy_payload(status: str, **overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "run_id": "run-1",
+        "status": status,
+        "verdict": status,
+        "reason": "pass-rate drop of 4.2 pts exceeds the allowed 2.0 pts",
+        "policy_source": "project_policy",
+        "policy": {"max_pass_rate_drop": 0.02},
+        "budgets": [
+            {
+                "name": "pass_rate_drop",
+                "observed": 0.042,
+                "allowed": 0.02,
+                "passed": False,
+                "scope": "overall",
+                "ci_low": 0.011,
+                "ci_high": 0.073,
+                "conclusive": True,
+            },
+            {
+                "name": "cost_increase",
+                "observed": 0.1,
+                "allowed": 0.25,
+                "passed": True,
+                "scope": "overall",
+                "ci_low": None,
+                "ci_high": None,
+                "conclusive": False,
+            },
+        ],
+        "blocking_regressions": [
+            {
+                "prompt_id": "p-refund",
+                "evaluator_name": "accuracy",
+                "slice_name": "safety_refusals",
+                "severity": "critical",
+                "delta_avg_score": -0.4,
+                "effect_size": -1.2,
+            }
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+CLEAN_DIFF: dict[str, Any] = {
+    "aggregate_delta": {"regressions": 0, "pass_rate_delta": 0.0},
+    "per_slice_deltas": [],
+}
+REGRESSED_DIFF: dict[str, Any] = {
+    "aggregate_delta": {"regressions": 3, "pass_rate_delta": -0.2},
+    "per_slice_deltas": [{"slice": "security", "pass_rate_delta": -0.5}],
+}
+
+
+def test_action_config_defaults_to_the_governed_policy_gate() -> None:
+    config = action.ActionConfig.from_env({"INPUT_TOKEN": "es_secret"})
+
+    assert config.fail_on == "policy"
+
+
+def test_manifest_fail_on_default_matches_the_script_default() -> None:
+    assert _manifest_input_default("fail-on") == "policy"
+
+
+def test_action_config_rejects_an_unknown_fail_on_mode() -> None:
+    with pytest.raises(action.ActionError) as excinfo:
+        action.ActionConfig.from_env({"INPUT_TOKEN": "es_secret", "INPUT_FAIL_ON": "sometimes"})
+
+    message = str(excinfo.value)
+    for mode in ("never", "regression", "any-slice-regression", "policy"):
+        assert mode in message
+
+
+def test_hosted_client_calls_the_policy_check_endpoint() -> None:
+    requests: list[tuple[str, str, dict[str, str], bytes | None]] = []
+
+    def fake_request(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        data: bytes | None = None,
+    ) -> dict[str, Any]:
+        requests.append((method, url, headers, data))
+        return _policy_payload("fail")
+
+    client = action.HostedClient("https://api.evalshift.dev/", "es_secret", request=fake_request)
+
+    payload = client.policy_check("candidate")
+
+    assert payload["status"] == "fail"
+    method, url, headers, data = requests[0]
+    assert method == "GET"
+    assert url == "https://api.evalshift.dev/runs/candidate/policy-check"
+    assert headers["Authorization"] == "Bearer es_secret"
+    assert data is None
+
+
+def test_policy_mode_fails_on_a_failing_policy_even_when_the_diff_is_clean() -> None:
+    """The governed gate decides, not the diff — that is the whole point of `policy`."""
+    result = action.evaluate_gating(CLEAN_DIFF, "policy", policy=_policy_payload("fail"))
+
+    assert result.should_fail is True
+    assert result.conclusion == "failure"
+    assert result.policy_status == "fail"
+    assert result.policy_source == "project_policy"
+    assert "exceeds the allowed" in result.policy_reason
+    assert [budget["name"] for budget in result.budgets] == ["pass_rate_drop", "cost_increase"]
+    assert result.blocking_regressions[0]["prompt_id"] == "p-refund"
+
+
+def test_policy_mode_passes_on_a_passing_policy_even_when_the_diff_regressed() -> None:
+    result = action.evaluate_gating(REGRESSED_DIFF, "policy", policy=_policy_payload("pass"))
+
+    assert result.should_fail is False
+    assert result.conclusion == "success"
+    assert result.policy_status == "pass"
+    # The diff facts still travel, because the comment still renders them.
+    assert result.regression_count == 3
+    assert result.top_slice_regressions[0]["slice"] == "security"
+
+
+def test_policy_mode_does_not_render_an_inconclusive_decision_as_a_pass() -> None:
+    result = action.evaluate_gating(CLEAN_DIFF, "policy", policy=_policy_payload("inconclusive"))
+
+    assert result.should_fail is False
+    assert result.policy_status == "inconclusive"
+    assert result.policy_decided is False
+    assert "could not decide" in result.summary
+
+
+def test_policy_mode_survives_a_status_it_has_never_heard_of() -> None:
+    """The server's status vocabulary grows; an older action must not crash or call it green."""
+    result = action.evaluate_gating(
+        CLEAN_DIFF, "policy", policy=_policy_payload("quantum_superposition")
+    )
+
+    assert result.should_fail is False
+    assert result.policy_decided is False
+    assert "quantum_superposition" in result.summary
+    assert "unrecognized" in result.summary
+
+
+# The server's own wording for `conditional_pass`: it says out loud that it is not a gate
+# failure, and it ends by telling the reader to look anyway.
+CONDITIONAL_PASS_REASON = (
+    "2 medium regressions and 1 comparison that scored zero pairs; every budget held and "
+    "nothing critical or high regressed, so this is not a gate failure. Review before merging."
+)
+
+
+def test_policy_mode_treats_conditional_pass_as_a_decided_pass_with_caveats() -> None:
+    """`conditional_pass` is a recognized, passing verdict — not an unknown, not undecided."""
+    result = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("conditional_pass", reason=CONDITIONAL_PASS_REASON),
+    )
+
+    assert result.should_fail is False
+    assert result.conclusion == "success"
+    assert result.policy_status == "conditional_pass"
+    assert result.policy_decided is True
+    assert result.policy_caveated is True
+    assert "unrecognized" not in result.summary
+    assert "could not decide" not in result.summary
+    assert "caveat" in result.summary
+    assert CONDITIONAL_PASS_REASON in result.summary
+
+
+def test_policy_mode_keeps_a_plain_pass_free_of_caveats() -> None:
+    result = action.evaluate_gating(CLEAN_DIFF, "policy", policy=_policy_payload("pass"))
+
+    assert result.policy_decided is True
+    assert result.policy_caveated is False
+    assert "caveat" not in result.summary
+
+
+def test_policy_mode_falls_back_to_regression_gating_and_says_so() -> None:
+    result = action.evaluate_gating(
+        REGRESSED_DIFF,
+        "policy",
+        policy=None,
+        policy_unavailable="hosted policy check returned HTTP 500",
+    )
+
+    assert result.should_fail is True
+    assert result.conclusion == "failure"
+    assert result.policy_unavailable_reason == "hosted policy check returned HTTP 500"
+    assert "fell back" in result.summary
+    assert "regression" in result.summary
+
+
+def test_policy_fallback_does_not_invent_a_failure_from_a_clean_diff() -> None:
+    result = action.evaluate_gating(
+        CLEAN_DIFF, "policy", policy=None, policy_unavailable="no stored decision"
+    )
+
+    assert result.should_fail is False
+    assert result.policy_unavailable_reason == "no stored decision"
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (HTTPError("https://api.test/policy-check", 404, "Not Found", {}, None), "404"),
+        (HTTPError("https://api.test/policy-check", 500, "Server Error", {}, None), "500"),
+        (URLError("connection refused"), "connection refused"),
+        (action.ActionError("hosted EvalShift refused the request (HTTP 403)"), "403"),
+    ],
+)
+def test_fetch_policy_check_reports_a_failure_instead_of_swallowing_it(
+    failure: Exception,
+    expected: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class BrokenClient:
+        def policy_check(self, run_id: str) -> dict[str, Any]:
+            raise failure
+
+    payload, reason = action.fetch_policy_check(BrokenClient(), "run-1")
+
+    assert payload is None
+    assert expected in reason
+    assert reason in capsys.readouterr().err
+
+
+def test_fetch_policy_check_treats_a_decisionless_response_as_unavailable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class SilentClient:
+        def policy_check(self, run_id: str) -> dict[str, Any]:
+            return {"run_id": run_id}
+
+    payload, reason = action.fetch_policy_check(SilentClient(), "run-1")
+
+    assert payload is None
+    assert "no decision" in reason
+    assert "warning" in capsys.readouterr().err
+
+
+def test_fetch_policy_check_returns_the_decision_when_the_server_has_one() -> None:
+    class HealthyClient:
+        def policy_check(self, run_id: str) -> dict[str, Any]:
+            return _policy_payload("fail")
+
+    payload, reason = action.fetch_policy_check(HealthyClient(), "run-1")
+
+    assert payload is not None
+    assert payload["status"] == "fail"
+    assert reason == ""
+
+
+def _policy_comment(gating: action.GatingResult, diff: dict[str, Any] | None = None) -> str:
+    return action.build_comment_body(
+        run_url="https://app.test/run",
+        diff_url="https://app.test/diff" if diff else None,
+        baseline={"id": "base"} if diff else None,
+        diff=diff,
+        gating=gating,
+    )
+
+
+def test_comment_renders_the_policy_decision_budgets_and_blocking_regressions() -> None:
+    gating = action.evaluate_gating(CLEAN_DIFF, "policy", policy=_policy_payload("fail"))
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert "project_policy" in body
+    assert "pass-rate drop of 4.2 pts exceeds the allowed 2.0 pts" in body
+    assert "pass_rate_drop" in body
+    assert "overall" in body
+    assert "0.042" in body
+    assert "0.02" in body
+    # The confidence-free budget is flagged rather than shown as a clean pass.
+    assert "not confident" in body
+    assert "p-refund" in body
+    assert "safety_refusals" in body
+    assert "critical" in body
+    # The existing diff section survives.
+    assert "| Slice | Pass-rate delta |" in body
+
+
+def test_comment_says_plainly_when_the_policy_could_not_decide() -> None:
+    gating = action.evaluate_gating(CLEAN_DIFF, "policy", policy=_policy_payload("inconclusive"))
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert "could not decide" in body
+    assert "`inconclusive`" in body
+
+
+def test_comment_renders_conditional_pass_as_a_pass_that_still_needs_a_look() -> None:
+    """It is a pass, so it must not read as undecided — and it has a caveat, so not as clean."""
+    gating = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("conditional_pass", reason=CONDITIONAL_PASS_REASON),
+    )
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert "`conditional_pass`" in body
+    assert CONDITIONAL_PASS_REASON in body
+    assert "passed, with caveats" in body
+    # The undecided blockquote belongs to `inconclusive` and to unknown statuses only.
+    assert "could not decide" not in body
+    assert "unrecognized" not in body
+
+
+def test_comment_does_not_caveat_a_plain_pass() -> None:
+    gating = action.evaluate_gating(CLEAN_DIFF, "policy", policy=_policy_payload("pass"))
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert "`pass`" in body
+    assert "caveat" not in body
+    assert "could not decide" not in body
+
+
+def test_comment_announces_a_policy_fallback() -> None:
+    gating = action.evaluate_gating(
+        CLEAN_DIFF, "policy", policy=None, policy_unavailable="hosted policy check returned 500"
+    )
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert "hosted policy check returned 500" in body
+    assert "fail-on: regression" in body
+
+
+def test_comment_caps_the_budget_table_and_keeps_the_failing_rows() -> None:
+    budgets = [
+        {
+            "name": f"budget_{index}",
+            "observed": 0.1,
+            "allowed": 0.5,
+            "passed": True,
+            "scope": "slice:s{index}",
+            "conclusive": True,
+        }
+        for index in range(40)
+    ]
+    budgets.append(
+        {
+            "name": "the_one_that_failed",
+            "observed": 0.9,
+            "allowed": 0.1,
+            "passed": False,
+            "scope": "overall",
+            "conclusive": True,
+        }
+    )
+    gating = action.evaluate_gating(
+        CLEAN_DIFF, "policy", policy=_policy_payload("fail", budgets=budgets)
+    )
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert body.count("| budget_") <= action.MAX_BUDGET_ROWS
+    assert "the_one_that_failed" in body
+    assert "more budgets not shown" in body
+    # Nothing failing was hidden here, so the cap line must not imply otherwise.
+    assert "of them failing" not in body
+
+
+def _slice_scoped_budgets() -> list[dict[str, Any]]:
+    """What P2 made possible: one budget name, evaluated per slice, more than six rows."""
+    return [
+        {
+            "name": "pass_rate_drop",
+            "observed": observed,
+            "allowed": 0.02,
+            "passed": observed <= 0.02,
+            "scope": scope,
+            "ci_low": None,
+            "ci_high": None,
+            "conclusive": True,
+        }
+        for scope, observed in (
+            ("overall", 0.01),
+            ("billing", 0.005),
+            ("safety_refusals", 0.09),
+            ("tool_use", 0.0),
+            ("long_context", 0.011),
+            ("multilingual", 0.002),
+            ("summarization", 0.004),
+        )
+    ]
+
+
+def test_comment_names_the_slice_each_budget_row_was_scoped_to() -> None:
+    """A slice-scoped budget is unreadable unless the row says which slice it judged."""
+    gating = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("fail", budgets=_slice_scoped_budgets()),
+    )
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    # Seven rows share one budget name; only `scope` tells them apart.
+    for scope in ("overall", "billing", "safety_refusals", "tool_use", "multilingual"):
+        assert f"| pass_rate_drop | {scope} |" in body
+    assert "| pass_rate_drop | safety_refusals | 0.09 | 0.02 | fail |" in body
+
+
+def test_comment_cap_line_admits_when_it_is_hiding_failing_budgets() -> None:
+    """Over the cap, "N more budgets not shown" must not bury N failures under a neutral line."""
+    budgets = [
+        {
+            "name": "pass_rate_drop",
+            "observed": 0.9,
+            "allowed": 0.02,
+            "passed": False,
+            "scope": f"slice_{index}",
+            "conclusive": True,
+        }
+        for index in range(action.MAX_BUDGET_ROWS + 8)
+    ]
+    gating = action.evaluate_gating(
+        CLEAN_DIFF, "policy", policy=_policy_payload("fail", budgets=budgets)
+    )
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert body.count("| pass_rate_drop |") == action.MAX_BUDGET_ROWS
+    assert "8 more budgets not shown" in body
+    assert "8 of them failing" in body
+
+
+def test_comment_renders_no_budget_table_for_an_all_insufficient_run() -> None:
+    """P3 returns `budgets: []` with `inconclusive`; an empty table would be worse than none."""
+    reason = "No comparable results: all 14 comparisons scored severity 'insufficient'."
+    gating = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload(
+            "inconclusive", reason=reason, budgets=[], blocking_regressions=[]
+        ),
+    )
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert "Policy budgets" not in body
+    assert "| Budget | Scope |" not in body
+    assert "Blocking regressions" not in body
+    # The reason is the whole of what the reader gets, so it had better be there.
+    assert reason in body
+    assert "could not decide" in body
+
+
+INCONCLUSIVE_REASONS = (
+    "No policy metrics recorded for this run.",
+    "No comparable results: all 14 comparisons scored severity 'insufficient'.",
+    "Policy slice 'safety_refusals' not measured by this run.",
+)
+
+
+@pytest.mark.parametrize("reason", INCONCLUSIVE_REASONS)
+def test_comment_surfaces_each_inconclusive_reason_verbatim(reason: str) -> None:
+    """Three causes ride on the reason string alone; generic wording would collapse them."""
+    gating = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("inconclusive", reason=reason, budgets=[]),
+    )
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert reason in body
+
+
+def test_the_three_inconclusive_causes_produce_three_different_comments() -> None:
+    bodies = {
+        _policy_comment(
+            action.evaluate_gating(
+                CLEAN_DIFF,
+                "policy",
+                policy=_policy_payload("inconclusive", reason=reason, budgets=[]),
+            ),
+            CLEAN_DIFF,
+        )
+        for reason in INCONCLUSIVE_REASONS
+    }
+
+    assert len(bodies) == len(INCONCLUSIVE_REASONS)
+
+
+def test_comment_renders_a_policy_decision_without_a_baseline() -> None:
+    gating = action.evaluate_gating(None, "policy", policy=_policy_payload("fail"))
+
+    body = _policy_comment(gating)
+
+    assert "No compatible baseline run was found" in body
+    assert "pass_rate_drop" in body
+    assert "p-refund" in body
+
+
+def test_comment_escapes_a_pipe_in_a_slice_name() -> None:
+    diff: dict[str, Any] = {
+        "aggregate_delta": {"regressions": 1, "pass_rate_delta": -0.2},
+        "per_slice_deltas": [{"slice": "billing | refunds", "pass_rate_delta": -0.5}],
+    }
+    gating = action.evaluate_gating(diff, "regression")
+
+    body = _policy_comment(gating, diff)
+
+    assert "| billing \\| refunds | -50 pts |" in body
+
+
+def test_comment_is_unchanged_for_the_diff_only_modes() -> None:
+    gating = action.evaluate_gating(REGRESSED_DIFF, "regression")
+
+    body = _policy_comment(gating, REGRESSED_DIFF)
+
+    assert "Policy" not in body
+    assert "budget" not in body
+
+
 @dataclass
 class FakeGitHub:
     comments: list[dict[str, Any]]
@@ -712,6 +1232,9 @@ class FakePreflightHostedClient:
     def run_diff(self, api_diff_url: str) -> dict[str, Any]:
         return {}
 
+    def policy_check(self, run_id: str) -> dict[str, Any]:
+        return _policy_payload("pass")
+
 
 def _preflight_workspace(tmp_path: Path) -> None:
     (tmp_path / "evalshift.yaml").write_text("version: 1\nproject: acme/checkout\n", "utf-8")
@@ -781,6 +1304,138 @@ def test_an_allowed_preflight_lets_the_suite_run(
 
 def test_repo_private_input_defaults_to_the_github_context() -> None:
     assert _manifest_input_default("repo-private") == "${{ github.event.repository.private }}"
+
+
+class FakePolicyHostedClient:
+    """Stands in for ``HostedClient`` in ``main``: no preflight, one policy decision."""
+
+    payload: ClassVar[dict[str, Any]] = {}
+    failure: ClassVar[Exception | None] = None
+    calls: ClassVar[list[str]] = []
+
+    def __init__(self, host: str, token: str) -> None:
+        self.host = host
+        self.token = token
+
+    def find_project_id(self, org_slug: str, project_slug: str) -> str | None:
+        return None
+
+    def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
+        raise AssertionError("an unhosted project has nothing to preflight")
+
+    def baseline_compatible(self, run_id: str, branch: str) -> dict[str, Any]:
+        return {}
+
+    def run_diff(self, api_diff_url: str) -> dict[str, Any]:
+        return {}
+
+    def policy_check(self, run_id: str) -> dict[str, Any]:
+        type(self).calls.append(run_id)
+        if type(self).failure is not None:
+            raise type(self).failure
+        return dict(type(self).payload)
+
+
+def _policy_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    payload: dict[str, Any],
+    failure: Exception | None = None,
+) -> int:
+    _preflight_workspace(tmp_path)
+    FakePolicyHostedClient.payload = payload
+    FakePolicyHostedClient.failure = failure
+    FakePolicyHostedClient.calls = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(action, "HostedClient", FakePolicyHostedClient)
+    monkeypatch.setattr(
+        action,
+        "run_evalshift_commands",
+        lambda *args, **kwargs: action.EvalShiftRunResult(
+            run_id="run-1", run_url="https://app.test/run"
+        ),
+    )
+    for key in list(os.environ):
+        if key.startswith(("INPUT_", "GITHUB_")):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("INPUT_TOKEN", "es_secret")
+    return action.main()
+
+
+def test_main_fails_the_job_on_a_failing_policy_without_any_diff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No baseline, so the diff gate would pass — the governed policy still fails the job."""
+    exit_code = _policy_main(monkeypatch, tmp_path, payload=_policy_payload("fail"))
+
+    assert exit_code == 1
+    assert FakePolicyHostedClient.calls == ["run-1"]
+
+
+def test_main_passes_the_job_on_a_passing_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    exit_code = _policy_main(monkeypatch, tmp_path, payload=_policy_payload("pass"))
+
+    assert exit_code == 0
+    assert FakePolicyHostedClient.calls == ["run-1"]
+
+
+def test_main_passes_the_job_on_a_conditional_pass_and_logs_the_caveat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End to end: `conditional_pass` merges, and the job log says why it was not clean."""
+    exit_code = _policy_main(
+        monkeypatch,
+        tmp_path,
+        payload=_policy_payload("conditional_pass", reason=CONDITIONAL_PASS_REASON),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "passed, with caveats" in out
+    assert "Review before merging." in out
+
+
+def test_main_does_not_fail_the_job_on_an_all_insufficient_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """P3's `budgets: []` + `inconclusive`: undecided, so no exit code is invented from it."""
+    reason = "No comparable results: all 14 comparisons scored severity 'insufficient'."
+    exit_code = _policy_main(
+        monkeypatch,
+        tmp_path,
+        payload=_policy_payload(
+            "inconclusive", reason=reason, budgets=[], blocking_regressions=[]
+        ),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert reason in out
+
+
+def test_main_warns_and_falls_back_when_the_policy_check_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = _policy_main(
+        monkeypatch,
+        tmp_path,
+        payload={},
+        failure=HTTPError("https://api.test/policy-check", 404, "Not Found", {}, None),
+    )
+
+    assert exit_code == 0
+    assert "404" in capsys.readouterr().err
 
 
 def test_set_status_warns_on_permission_error(capsys: pytest.CaptureFixture[str]) -> None:

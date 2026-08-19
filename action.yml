@@ -30,9 +30,9 @@ inputs:
     required: false
     default: "3.14"
   fail-on:
-    description: "Gating mode: never, regression, or any-slice-regression."
+    description: "Gating mode: policy, never, regression, or any-slice-regression."
     required: false
-    default: regression
+    default: policy
   branch:
     description: Candidate branch override. Auto-detected when omitted.
     required: false
