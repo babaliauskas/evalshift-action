@@ -4,6 +4,16 @@ Run your EvalShift golden suite on every pull request, push the result to hosted
 EvalShift, keep one PR comment up to date, and fail the check when your
 migration policy says the candidate is not safe to ship.
 
+## For AI coding agents
+
+Point your coding agent at the dense, single-file reference for the piece it is
+working on:
+
+- EvalShift CLI: <https://www.evalshift.dev/cli-llms-full.txt>
+- EvalShift SDK: <https://www.evalshift.dev/sdk-llms-full.txt>
+- EvalShift GitHub Action (CI): <https://www.evalshift.dev/ci-llms-full.txt>
+  (source of truth: [llms-full.txt](llms-full.txt) in this repo)
+
 > **Behaviour change — the default gate moved.** `fail-on` now defaults to
 > `policy`: hosted EvalShift judges the run against your project's migration
 > policy instead of the action counting regressions in the diff. A run that
