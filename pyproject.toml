@@ -13,6 +13,14 @@ dev = [
     "ruff>=0.8",
 ]
 
+[tool.uv]
+# pip is not a direct dependency: pip-audit -> pip-api -> pip drags it in.
+# pip 26.1.2 carries PYSEC-2026-3721, fixed in 26.2, which fails the
+# "Dependency audit" CI job. Floor the transitive pin instead of declaring
+# a direct dev dependency on a tool we never call ourselves. Drop this once
+# pip-api resolves to a fixed pip on its own.
+constraint-dependencies = ["pip>=26.2"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
