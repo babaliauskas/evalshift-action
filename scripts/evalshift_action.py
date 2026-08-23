@@ -24,7 +24,7 @@ from urllib.request import Request, urlopen
 COMMENT_MARKER = "<!-- evalshift:comment -->"
 STATUS_CONTEXT = "evalshift/regression"
 DEFAULT_HOST = "https://api.evalshift.dev"
-DEFAULT_EVALSHIFT_VERSION = "0.11.0"
+DEFAULT_EVALSHIFT_VERSION = "0.12.0"
 
 FAIL_ON_MODES = ("never", "regression", "any-slice-regression", "policy")
 DEFAULT_FAIL_ON = "policy"

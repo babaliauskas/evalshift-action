@@ -53,7 +53,7 @@ practice assume no cache reuse across CI runs).
 ## Execution model
 
 Composite `runs.steps`, in order:
-1. `actions/setup-python@v7` with `python-version` (default `3.14`).
+1. `actions/setup-python@v7` with `python-version` (default `3.12`).
 2. `python -m pip install --upgrade pip` then `python -m pip install "evalshift==<evalshift-version>"`.
    No pip caching; expect ~20-60s of install per run.
 3. `python "$GITHUB_ACTION_PATH/scripts/evalshift_action.py"` with `id: run`, all inputs passed
@@ -76,8 +76,8 @@ log until it completes.
 | host | no | https://api.evalshift.dev | Hosted API base URL. Trailing `/` stripped. Passed as env `EVALSHIFT_HOST`. Set only for self-hosted/staging. |
 | config | no | evalshift.yaml | Path to config, relative to workspace root. Paths *inside* the config resolve relative to the config file's own directory (CLI behavior), so a config in a subdirectory works unchanged. |
 | suite | no | golden.jsonl | Path to golden JSONL suite, relative to workspace root. |
-| evalshift-version | no | 0.11.0 | Exact CLI version installed from PyPI. Pinned for reproducibility. |
-| python-version | no | 3.14 | Python for the CLI. Must satisfy the CLI's `requires-python` (>=3.14 for 0.11.0); lowering it breaks install. |
+| evalshift-version | no | 0.12.0 | Exact CLI version installed from PyPI. Pinned for reproducibility. |
+| python-version | no | 3.12 | Python for the CLI. Must satisfy the CLI's `requires-python` (>=3.11 for 0.12.0); lowering it below that breaks install. |
 | fail-on | no | policy | `policy` \| `never` \| `regression` \| `any-slice-regression`. Any other value → hard error before any work. DEFAULT CHANGED: was `regression`; `policy` gates on the server's migration-policy verdict, not on the diff. |
 | branch | no | "" (auto) | Candidate branch recorded on the hosted run. Auto-detected; override only for non-standard naming. |
 | base-branch | no | "" (auto) | Branch searched for a baseline run. Auto-detected. If it resolves empty, no baseline lookup happens at all and the check passes. |
@@ -466,7 +466,7 @@ the env var covers any other prompt a CLI release adds.
 - The helper has zero third-party dependencies; `pyproject.toml` declares `dependencies = []`
   and dev-only `pytest` / `ruff` / `pip-audit`.
 - `requires-python = ">=3.12"` for the helper itself; the `python-version` input governs the
-  CLI, which is stricter (>=3.14).
+  CLI, which is looser (>=3.11), so the helper's own floor is the binding one.
 
 ## Repo CI (what guards this action)
 
@@ -594,7 +594,7 @@ and the PR comment says so. A persistent 404 usually means the project has no mi
 Two comments on one PR → two action invocations, or the marker comment fell off page 1 of the
 comments API.
 Job is silent for minutes → output is captured and printed per command, not streamed.
-Install fails on `evalshift==0.11.0` → `python-version` below the CLI's `requires-python` (3.14).
+Install fails on `evalshift==0.12.0` → `python-version` below the CLI's `requires-python` (3.11).
 Costs higher than expected → the runner has a cold CLI cache every run; narrow the trigger with
 `on.pull_request.paths`, or shrink the suite.
 
