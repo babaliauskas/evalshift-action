@@ -541,8 +541,9 @@ config pointed at with `config:`.
 
 ## Plan limits and the CI preflight
 
-Hosted EvalShift plans limit a few things that CI runs into: private-repo CI, runs per month,
-and how many runs an org may have in flight at once. Discovering one of those halfway through a
+Hosted EvalShift plans limit a few things that CI runs into: runs per month and how many runs
+an org may have in flight at once. (Private-repo CI is included on every plan; the preflight
+still reports the repository's visibility.) Discovering one of those halfway through a
 suite means paying for the model calls and getting nothing, so the action asks first.
 
 **What it does, before installing anything of yours or spending a credit:**
@@ -785,7 +786,8 @@ gating still works — only the comment is lost.
 
 The [CI preflight](#plan-limits-and-the-ci-preflight) got a `402`: the org's plan doesn't cover
 this run. The annotation and the step summary name the limit and link to the billing page. The
-usual cause is private-repo CI on a Free plan. Nothing was run and nothing was charged.
+usual causes are the monthly run quota and the parallelism cap. Nothing was run and nothing
+was charged.
 
 ### `warning: plan preflight skipped: ...`
 

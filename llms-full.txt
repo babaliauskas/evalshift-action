@@ -577,8 +577,8 @@ key cannot create projects; pre-create it and set `create-project: false`.
 `Project owner role required` → push tried to rewrite gating thresholds (`policy:configure`,
 owner-only); drop `thresholds:` from the CI config.
 Job failed before the CLI ran, with a plan message and an upgrade link → CI preflight got a
-402; the org's plan does not cover this run (usually private-repo CI on Free). Nothing ran,
-nothing was charged.
+402; the org's plan does not cover this run (usually the monthly run quota or the parallelism
+cap; private-repo CI is included on every plan). Nothing ran, nothing was charged.
 `warning: plan preflight skipped: <exc>` → preflight got no answer (project not hosted yet,
 token without `project:read`, hosted API unreachable). Intended: the run continues and the
 server enforces the limit at upload.

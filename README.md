@@ -276,7 +276,8 @@ and calls `POST /projects/{id}/ci-preflight` with the repository's visibility.
 If the answer is a `402`, the job stops before any model credits are spent. You get an
 `::error::` annotation, a step summary, and — on a pull request — the usual EvalShift comment
 carrying the server's message, the plan you're on, what was blocked, and an upgrade link. The
-common case is private-repo CI, which needs a paid plan.
+common cases are the monthly run quota and the parallelism cap; private-repo CI is included
+on every plan, the free one included.
 
 Anything else — EvalShift being down, a project that doesn't exist yet, a token that can't list
 projects — is treated as an infrastructure problem: the action logs a warning and runs anyway.
