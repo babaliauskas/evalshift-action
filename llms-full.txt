@@ -95,7 +95,7 @@ false. All inputs are `.strip()`ed.
 |---|---|
 | run_url | Hosted run URL, parsed as the last http(s) line of `evalshift push` stdout. Empty is impossible — a push that prints no URL is a hard error. |
 | diff_url | Hosted `web_diff_url` for the baseline comparison; empty string when no compatible baseline. |
-| run_id | Local/hosted run id (e.g. `r_20260723_myssuite_ab12cd`). |
+| run_id | Hosted run id — the server-minted UUID, read off the end of `run_url`. NOT the local run directory name (`r_20260723_mysuite_ab12cd`), which addresses nothing beyond the runner's own disk. |
 | regression_count | `aggregate_delta.regressions` from the hosted diff; `0` when no baseline. |
 | conclusion | `success` or `failure`, after applying `fail-on`. It is a GitHub commit-status state, so both a `conditional_pass` and an undecided policy (`inconclusive` or an unknown status) read `success` here; the PR comment and the status description carry the verdict. |
 
@@ -109,18 +109,29 @@ corrupt the output file.
 evalshift all  --yes --config <config> --suite <suite>
 evalshift push <run_id> --config <config> --suite <suite> [--no-create-project]
 ```
-Both inherit the job environment plus `EVALSHIFT_HOST` and `EVALSHIFT_TOKEN`. A non-zero exit
-from either raises `ActionError` and fails the step (message: `command failed (<rc>): <cmd>`).
+Both inherit the job environment plus `EVALSHIFT_HOST`, `EVALSHIFT_TOKEN` and `COLUMNS=512`.
+A non-zero exit from either raises `ActionError` and fails the step (message:
+`command failed (<rc>): <cmd>`). `COLUMNS` is set because the CLI prints through rich, which
+folds output at the console width (80 when stdout is a pipe, which it always is here) and
+would otherwise split the hosted run URL across two lines.
 
-`run_id` is NOT parsed from CLI output. It is the directory under `<cwd>/.evalshift/runs` with
-the newest mtime. Consequences: a pre-existing `.evalshift/runs` in the checkout is harmless
-(the fresh run is newest), but any step that touches an older run directory between `all` and
-the run-id read can select the wrong run. Missing directory → `run directory ... does not
-exist`; empty directory → `no local EvalShift runs found in ...`.
+The `<run_id>` argument to `push` is the LOCAL run id: the directory under
+`<cwd>/.evalshift/runs` with the newest mtime, never parsed from CLI output. Consequences: a
+pre-existing `.evalshift/runs` in the checkout is harmless (the fresh run is newest), but any
+step that touches an older run directory between `all` and the run-id read can select the
+wrong run. Missing directory → `run directory ... does not exist`; empty directory → `no local
+EvalShift runs found in ...`.
 
 `run_url` extraction scans `push` stdout bottom-up for the first non-empty line starting with
 `http://` or `https://`. A CLI release that stops printing a bare URL as the last line breaks
 this (guarded by the `cli-contract` CI job, which only checks flags, not output shape).
+
+The HOSTED run id — the `run_id` output, and the id in every `/runs/{id}` call below — is the
+last path segment of that `run_url` (`.../runs/<uuid>`), because the server mints it and the
+URL is the only place `push` reports it. It must match the canonical UUID shape or the step
+fails with `could not read a server run id out of the hosted run URL: ...`; guessing would
+buy a 404 on `policy-check`, which the gate reads as "no stored policy decision" and degrades
+past. The local `r_…` id is never sent to the API.
 
 ## Plan preflight (runs BEFORE the CLI)
 

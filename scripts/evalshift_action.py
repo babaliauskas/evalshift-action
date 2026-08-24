@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 COMMENT_MARKER = "<!-- evalshift:comment -->"
@@ -28,6 +28,23 @@ DEFAULT_EVALSHIFT_VERSION = "0.12.1"
 
 FAIL_ON_MODES = ("never", "regression", "any-slice-regression", "policy")
 DEFAULT_FAIL_ON = "policy"
+
+# A run has two ids and they are not interchangeable. The local one names the directory under
+# `.evalshift/runs` and is what `evalshift push` takes as its argument; the server mints its
+# own at `POST /runs` and that is the only value `/runs/{id}` routes accept. The CLI prints the
+# hosted run URL and nothing else, so the server id reaches the action as its last path
+# segment — a canonical UUID, matched strictly so a truncated or unexpected URL is caught here
+# rather than as a puzzling 404 further down.
+SERVER_RUN_ID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+# The CLI prints through Rich, which folds output at the console width — 80 columns whenever
+# stdout is a pipe, which it always is under `run_command`. A hosted run URL runs past 80
+# characters, and half a URL is both an unusable link in the PR comment and an unusable run id.
+# Rich reads `COLUMNS` when it cannot measure a terminal, so the action names a width no URL
+# will reach.
+CLI_CONSOLE_COLUMNS = "512"
 
 # What `policy` degrades to when hosted EvalShift cannot supply a decision. Never `never`:
 # an unreachable policy endpoint must not be a way to merge a regression unnoticed.
@@ -137,6 +154,14 @@ class CommandResult:
 
 @dataclass(frozen=True)
 class EvalShiftRunResult:
+    """One pushed run, as hosted EvalShift knows it.
+
+    ``run_id`` is the **server-minted** id read back out of ``run_url`` — the value every
+    ``/runs/{id}`` route takes and the one the action reports as its ``run_id`` output. It is
+    deliberately not the local run directory name, which addresses nothing beyond this
+    machine's ``.evalshift/runs``.
+    """
+
     run_id: str
     run_url: str
 
@@ -450,16 +475,19 @@ def run_evalshift_commands(
     command_env = dict(env or os.environ)
     command_env["EVALSHIFT_HOST"] = config.host
     command_env["EVALSHIFT_TOKEN"] = config.token
+    command_env["COLUMNS"] = CLI_CONSOLE_COLUMNS
     run(
         ["evalshift", "all", "--yes", "--config", config.config, "--suite", config.suite],
         cwd,
         command_env,
     )
-    run_id = latest_run_id(cwd / ".evalshift" / "runs")
+    local_run_id = latest_run_id(cwd / ".evalshift" / "runs")
     push_cmd = [
         "evalshift",
         "push",
-        run_id,
+        # The local directory name, not the hosted id: this argument names the run to read
+        # off this disk, and the server has not minted anything for it yet.
+        local_run_id,
         "--config",
         config.config,
         "--suite",
@@ -471,7 +499,7 @@ def run_evalshift_commands(
     run_url = extract_url(pushed.stdout)
     if not run_url:
         raise ActionError("evalshift push did not print a hosted run URL")
-    return EvalShiftRunResult(run_id=run_id, run_url=run_url)
+    return EvalShiftRunResult(run_id=server_run_id_from_url(run_url), run_url=run_url)
 
 
 def run_command(cmd: list[str], cwd: Path, env: dict[str, str]) -> CommandResult:
@@ -666,6 +694,23 @@ def extract_url(output: str) -> str:
         if line.startswith("http://") or line.startswith("https://"):
             return line
     return ""
+
+
+def server_run_id_from_url(run_url: str) -> str:
+    """The server-minted run id in a hosted run URL (``.../runs/<id>``).
+
+    Raises rather than guesses. Every hosted call the action makes afterwards is keyed on this
+    value, and a wrong one does not fail loudly: ``/runs/{id}/policy-check`` answers 404, which
+    the gate reads as "this run has no stored policy decision" and degrades through. Better a
+    named error here than a green check bought with the wrong id.
+    """
+    last_segment = unquote(urlsplit(run_url).path.rstrip("/").rsplit("/", 1)[-1])
+    if not SERVER_RUN_ID_PATTERN.match(last_segment):
+        raise ActionError(
+            f"could not read a server run id out of the hosted run URL: {run_url!r} "
+            "(expected it to end in /runs/<uuid>)"
+        )
+    return last_segment
 
 
 def fetch_policy_check(hosted: Any, run_id: str) -> tuple[dict[str, Any] | None, str]:

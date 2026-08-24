@@ -225,7 +225,7 @@ PR comment says so explicitly. `policy` still asks the server for a verdict.
 | ------------------ | ----- |
 | `run_url`          | Hosted run URL for this run. |
 | `diff_url`         | Hosted diff URL comparing this run to the baseline. Empty string when no compatible baseline was found. |
-| `run_id`           | EvalShift run id, usable with `evalshift` CLI commands locally. |
+| `run_id`           | Hosted EvalShift run id — the server-minted id every `/runs/{id}` API route takes. Not the local `r_…` run directory name. |
 | `regression_count` | Number of regressed examples in the hosted diff. `0` when there is no baseline. |
 | `conclusion`       | `success` or `failure`, reflecting `fail-on`. A policy that declined to decide is a `success` here — read the PR comment or the commit status for the verdict itself. |
 

@@ -118,46 +118,58 @@ def test_latest_run_id_uses_most_recent_run_directory(tmp_path: Path) -> None:
     assert action.latest_run_id(runs) == "run-new"
 
 
+# The two ids a run has. `LOCAL_RUN_ID` names the directory under `.evalshift/runs` and is
+# what `evalshift push` takes as its argument; `SERVER_RUN_ID` is what the server minted and
+# what every `/runs/{id}` route addresses. Keeping both in the fixtures is the point — a test
+# that used one string for both could not catch the two being swapped.
+LOCAL_RUN_ID = "r_20260824_golden_ab12cd"
+SERVER_RUN_ID = "3f6b1c2e-9a4d-4f11-8c0e-2b7d5a19e8c4"
+
+
+def _push_config(**overrides: Any) -> action.ActionConfig:
+    settings: dict[str, Any] = {
+        "token": "es_secret",
+        "host": "https://api.evalshift.dev",
+        "config": "evalshift.yaml",
+        "suite": "golden.jsonl",
+        "evalshift_version": "0.4.0",
+        "fail_on": "regression",
+        "branch": "",
+        "base_branch": "main",
+        "create_project": False,
+        "comment": True,
+        "github_token": "ghs_secret",
+    }
+    settings.update(overrides)
+    return action.ActionConfig(**settings)
+
+
 def test_run_evalshift_commands_runs_all_then_push(tmp_path: Path) -> None:
     runs = tmp_path / ".evalshift" / "runs"
-    (runs / "run-1").mkdir(parents=True)
+    (runs / LOCAL_RUN_ID).mkdir(parents=True)
     calls: list[list[str]] = []
     envs: list[dict[str, str]] = []
+    run_url = f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}"
 
     def fake_runner(cmd: list[str], cwd: Path, env: dict[str, str]) -> action.CommandResult:
         calls.append(cmd)
         envs.append(env)
-        stdout = (
-            "https://app.evalshift.dev/app/acme/project/runs/run-1\n"
-            if cmd[1] == "push"
-            else ""
+        return action.CommandResult(
+            stdout=f"{run_url}\n" if cmd[1] == "push" else "",
+            returncode=0,
         )
-        return action.CommandResult(stdout=stdout, returncode=0)
 
-    config = action.ActionConfig(
-        token="es_secret",
-        host="https://api.evalshift.dev",
-        config="evalshift.yaml",
-        suite="golden.jsonl",
-        evalshift_version="0.4.0",
-        fail_on="regression",
-        branch="",
-        base_branch="main",
-        create_project=False,
-        comment=True,
-        github_token="ghs_secret",
+    result = action.run_evalshift_commands(
+        _push_config(), cwd=tmp_path, runner=fake_runner, env={}
     )
 
-    result = action.run_evalshift_commands(config, cwd=tmp_path, runner=fake_runner, env={})
-
-    assert result.run_id == "run-1"
-    assert result.run_url == "https://app.evalshift.dev/app/acme/project/runs/run-1"
+    assert result.run_url == run_url
     assert calls == [
         ["evalshift", "all", "--yes", "--config", "evalshift.yaml", "--suite", "golden.jsonl"],
         [
             "evalshift",
             "push",
-            "run-1",
+            LOCAL_RUN_ID,
             "--config",
             "evalshift.yaml",
             "--suite",
@@ -170,6 +182,97 @@ def test_run_evalshift_commands_runs_all_then_push(tmp_path: Path) -> None:
         assert "es_secret" not in cmd
         assert env["EVALSHIFT_TOKEN"] == "es_secret"
         assert env["EVALSHIFT_HOST"] == "https://api.evalshift.dev"
+
+
+def _push_result(
+    tmp_path: Path,
+    push_stdout: str,
+    *,
+    envs: list[dict[str, str]] | None = None,
+) -> action.EvalShiftRunResult:
+    """Drive `run_evalshift_commands` with a canned `evalshift push` stdout."""
+    (tmp_path / ".evalshift" / "runs" / LOCAL_RUN_ID).mkdir(parents=True)
+
+    def fake_runner(cmd: list[str], cwd: Path, env: dict[str, str]) -> action.CommandResult:
+        if envs is not None:
+            envs.append(env)
+        return action.CommandResult(
+            stdout=push_stdout if cmd[1] == "push" else "",
+            returncode=0,
+        )
+
+    return action.run_evalshift_commands(
+        _push_config(), cwd=tmp_path, runner=fake_runner, env={}
+    )
+
+
+def test_run_evalshift_commands_reports_the_server_run_id_not_the_local_one(
+    tmp_path: Path,
+) -> None:
+    """`/runs/{id}` takes the id the server minted, which the local directory name is not."""
+    result = _push_result(
+        tmp_path,
+        f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}\n",
+    )
+
+    assert result.run_id == SERVER_RUN_ID
+
+
+def test_run_evalshift_commands_rejects_a_push_url_with_no_server_run_id(
+    tmp_path: Path,
+) -> None:
+    """Failing loudly beats gating on an id that 404s and reads as "no policy configured"."""
+    with pytest.raises(action.ActionError, match="server run id"):
+        _push_result(
+            tmp_path,
+            f"https://app.evalshift.dev/app/acme/project/runs/{LOCAL_RUN_ID}\n",
+        )
+
+
+def test_run_evalshift_commands_widens_the_cli_console(tmp_path: Path) -> None:
+    """The CLI prints the hosted URL through Rich, which folds at the console width — 80 when
+    stdout is a pipe, which it always is under `run_command`. A hosted run URL passes 80
+    characters once the run id is a UUID, so the action asks for a width no URL will reach.
+    """
+    envs: list[dict[str, str]] = []
+    _push_result(
+        tmp_path,
+        f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}\n",
+        envs=envs,
+    )
+
+    assert envs
+    for env in envs:
+        assert int(env["COLUMNS"]) >= 200
+
+
+@pytest.mark.parametrize(
+    "run_url",
+    [
+        f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}",
+        f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}/",
+        f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}?from=ci",
+    ],
+)
+def test_server_run_id_from_url_reads_the_last_path_segment(run_url: str) -> None:
+    assert action.server_run_id_from_url(run_url) == SERVER_RUN_ID
+
+
+@pytest.mark.parametrize(
+    "run_url",
+    [
+        # The client id — what the action used to pass to `/runs/{id}` and what a stale CLI
+        # would still print in the URL.
+        f"https://app.evalshift.dev/app/acme/project/runs/{LOCAL_RUN_ID}",
+        # A URL Rich folded at 80 columns, so the id lost its tail.
+        "https://app.evalshift.dev/app/acme-analytics/checkout-agent/runs/3f6b1c2e-9a4d-4",
+        "https://app.evalshift.dev/app/acme/project",
+        "",
+    ],
+)
+def test_server_run_id_from_url_refuses_anything_that_is_not_a_server_id(run_url: str) -> None:
+    with pytest.raises(action.ActionError, match="server run id"):
+        action.server_run_id_from_url(run_url)
 
 
 def test_mask_secret_emits_github_mask_command(capsys: pytest.CaptureFixture[str]) -> None:

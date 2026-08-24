@@ -256,7 +256,7 @@ Boolean inputs accept `1`, `true`, `yes`, `on` (case-insensitive). Anything else
 | ------ | ----- |
 | `run_url` | Hosted run URL for this run. |
 | `diff_url` | Hosted diff URL comparing this run to the baseline. Empty string when no compatible baseline was found. |
-| `run_id` | EvalShift run id, usable with `evalshift` CLI commands locally. |
+| `run_id` | Hosted EvalShift run id — the server-minted id every `/runs/{id}` API route takes. Not the local `r_…` run directory name. |
 | `regression_count` | Number of regressed examples in the hosted diff. `0` when there is no baseline. |
 | `conclusion` | `success` or `failure`, reflecting `fail-on`. These are GitHub commit-status states, so a policy that *declined* to decide is `success` here — the PR comment and the status description carry the verdict itself. |
 
@@ -702,12 +702,13 @@ Worth knowing before you rely on this in anger:
   first being updated.
 - **The comment marker and status context are global constants.** Parallel invocations on the
   same PR overwrite each other. One commenting invocation per PR.
-- **The run id is the newest directory under `.evalshift/runs`.** If a step between the run and
-  the push touches an older run directory's mtime, the wrong run gets pushed. In a normal
-  workflow this never happens.
-- **The hosted run URL is parsed from CLI stdout.** A CLI release that changes how the push
-  result is printed would break this. The repo's `cli-contract` CI job guards flag renames but
-  not output shape.
+- **The run that gets pushed is the newest directory under `.evalshift/runs`.** If a step
+  between the run and the push touches an older run directory's mtime, the wrong run gets
+  pushed. In a normal workflow this never happens.
+- **The hosted run URL is parsed from CLI stdout, and the hosted run id is read off the end of
+  it.** A CLI release that changes how the push result is printed would break both. The repo's
+  `cli-contract` CI job guards flag renames but not output shape; a URL the action cannot read
+  a run id out of fails the step rather than gating on a guess.
 - **No retries on hosted API calls.** A 30-second timeout, one attempt. A transient hosted
   outage fails the step rather than silently passing — deliberate, but it means a flaky network
   reads as a failed job.
