@@ -39,10 +39,19 @@ SERVER_RUN_ID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 
-# Where in a hosted run URL's path that id lives. The `/runs/` marker is the whole point: any
-# URL has a last segment, but only the one behind `/runs/` addresses a run. The capture is
-# deliberately loose — `SERVER_RUN_ID_PATTERN` above is what decides whether it is a real id.
-RUN_URL_ID_PATTERN = re.compile(r"/runs/([0-9a-fA-F-]{36})(?:[/?#]|$)")
+# Where in a hosted run URL's path that id lives. The server builds exactly one shape —
+# `{web_app_url}/app/{org_slug}/{project_slug}/runs/{id}` — so the whole shape is anchored, not
+# just the `/runs/` marker. Anchoring only the marker took the LEFTMOST `/runs/<36 chars>`,
+# which an org slugged `runs` sitting in front of a UUID-shaped project slug turns into the
+# project slug: a valid-looking wrong id, and a wrong id fails silently (404 on policy-check,
+# read as "no stored policy decision", degraded past). Slugs really can collide this way —
+# the server's `slugify` maps every non-alphanumeric run to `-`, so a UUID-shaped slug is
+# reachable from an ordinary-looking project name.
+#
+# Anchored, not rooted: no `^`, because `web_app_url` is a plain string setting that may carry
+# a base path (`https://example.com/tools`). The capture is deliberately loose —
+# `SERVER_RUN_ID_PATTERN` above is what decides whether it is a real id.
+RUN_URL_ID_PATTERN = re.compile(r"/app/[^/]+/[^/]+/runs/([0-9a-fA-F-]{36})(?:[/?#]|$)")
 
 # The CLI prints through Rich, which folds output at the console width — 80 columns whenever
 # stdout is a pipe, which it always is under `run_command`. A hosted run URL runs past 80
@@ -705,16 +714,18 @@ def extract_url(output: str) -> str:
 
 
 def server_run_id_from_url(run_url: str) -> str:
-    """The server-minted run id in a hosted run URL (``.../runs/<id>``).
+    """The server-minted run id in a hosted run URL (``.../app/{org}/{project}/runs/<id>``).
 
     Raises rather than guesses. Every hosted call the action makes afterwards is keyed on this
     value, and a wrong one does not fail loudly: ``/runs/{id}/policy-check`` answers 404, which
     the gate reads as "this run has no stored policy decision" and degrades through. Better a
     named error here than a green check bought with the wrong id.
 
-    Anchored on the ``/runs/`` marker rather than taking whatever segment ends the path: a
-    ``.../projects/<uuid>`` URL is the right shape and the wrong thing, and a deeper route such
-    as ``.../runs/<a>/diff/<b>`` ends on the id of the *other* side of the comparison.
+    Anchored on the server's full URL shape rather than on whatever segment ends the path or
+    the first ``/runs/`` in it. A ``.../projects/<uuid>`` URL is the right shape and the wrong
+    thing; ``.../runs/<a>/diff/<b>`` ends on the id of the *other* side of the comparison; and
+    an org slugged ``runs`` in front of a UUID-shaped project slug puts a decoy ``/runs/<36
+    chars>`` to the left of the real one.
 
     Matched against the RAW path, deliberately un-unquoted. Do not "restore" a ``unquote()``
     here: decoding first would let a ``%2Fruns%2F<uuid>`` sequence inside some other segment
@@ -727,7 +738,7 @@ def server_run_id_from_url(run_url: str) -> str:
     if not SERVER_RUN_ID_PATTERN.match(run_id):
         raise ActionError(
             f"could not read a server run id out of the hosted run URL: {run_url!r} "
-            "(expected a /runs/<uuid> path segment)"
+            "(expected an /app/<org>/<project>/runs/<uuid> path)"
         )
     return run_id
 

@@ -708,9 +708,10 @@ Worth knowing before you rely on this in anger:
   between the run and the push touches an older run directory's mtime, the wrong run gets
   pushed. In a normal workflow this never happens.
 - **The hosted run URL is parsed from CLI stdout, and the hosted run id is read out of its
-  `/runs/<uuid>` segment.** A CLI release that changes how the push result is printed would
-  break both. The repo's `cli-contract` CI job guards flag renames but not output shape; a URL
-  the action cannot read a run id out of fails the step rather than gating on a guess.
+  `/app/{org}/{project}/runs/<uuid>` path.** The action anchors that whole shape, so a change
+  to either how the push result is printed or how the web app routes runs would break it. The
+  repo's `cli-contract` CI job guards flag renames but not output shape; a URL the action
+  cannot read a run id out of fails the step rather than gating on a guess.
 - **No retries on hosted API calls.** A 30-second timeout, one attempt. A transient hosted
   outage fails the step rather than silently passing — deliberate, but it means a flaky network
   reads as a failed job.
@@ -759,11 +760,11 @@ against the same host and see what it prints. Also check for a CLI version misma
 
 ### `could not read a server run id out of the hosted run URL: ...`
 
-The push printed a URL, but the action could not find a `/runs/<uuid>` segment in it. Every
-hosted call afterwards is keyed on that id, so the action stops rather than gate on a guess.
-Usually a CLI version mismatch — an older CLI printed the local `r_…` run directory name in the
-URL instead of the server-minted id. Check the printed URL in the step log and pin a newer
-`evalshift-version`.
+The push printed a URL, but the action could not find an `/app/{org}/{project}/runs/<uuid>`
+path in it. Every hosted call afterwards is keyed on that id, so the action stops rather than
+gate on a guess. Usually a CLI version mismatch — an older CLI printed the local `r_…` run
+directory name in the URL instead of the server-minted id. Check the printed URL in the step
+log and pin a newer `evalshift-version`.
 
 ### HTTP 401 from the hosted API
 

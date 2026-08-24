@@ -128,6 +128,12 @@ SERVER_RUN_ID = "3f6b1c2e-9a4d-4f11-8c0e-2b7d5a19e8c4"
 # one behind `/runs/` is the run being gated.
 OTHER_UUID = "8d21e7a0-5c63-4b98-9f04-6ae1cb37d250"
 SERVER_RUN_URL = f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}"
+# A project slug that is itself UUID-shaped. The server's `slugify` maps every run of
+# non-alphanumerics to `-`, so a project named "3F6B1C2E 9A4D 4F11 8C0E 2B7D5A19E8C5" really
+# does slugify to this. It differs from SERVER_RUN_ID only in the final character, so a parse
+# that returns the slug instead of the run id shows up as a one-character assertion diff
+# rather than as a plausible-looking pass.
+UUID_SHAPED_SLUG = "3f6b1c2e-9a4d-4f11-8c0e-2b7d5a19e8c5"
 
 
 def _fake_run_result() -> action.EvalShiftRunResult:
@@ -272,6 +278,18 @@ def test_run_evalshift_commands_widens_the_cli_console(tmp_path: Path) -> None:
         # A deeper route under the same run: the id is the segment behind `/runs/`, not
         # whatever happens to end the path.
         f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}/diff/{OTHER_UUID}",
+        # An org literally slugged `runs` whose project slug is UUID-shaped, so the path
+        # carries two `/runs/<36 chars>` boundaries. Matching the leftmost one returned the
+        # project slug — a valid-looking wrong UUID, which 404s on policy-check and degrades
+        # to `fail-on: regression` without ever failing loudly. Anchoring the whole
+        # `/app/{org}/{project}/runs/` shape is what makes the right one the leftmost.
+        f"https://app.evalshift.dev/app/runs/{UUID_SHAPED_SLUG}/runs/{SERVER_RUN_ID}",
+        # The same org slug without the colliding project slug: already correct before the
+        # anchor widened, and pinned so it stays that way.
+        f"https://app.evalshift.dev/app/runs/p/runs/{SERVER_RUN_ID}",
+        # A deploy whose `web_app_url` carries a base path. `web_app_url` is a plain string
+        # setting with no validator forbidding one, so the match is anchored but not rooted.
+        f"https://evalshift.example.com/tools/app/acme/project/runs/{SERVER_RUN_ID}",
     ],
 )
 def test_server_run_id_from_url_reads_the_segment_behind_runs(run_url: str) -> None:
