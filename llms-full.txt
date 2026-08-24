@@ -383,7 +383,8 @@ Set on every event where `github-token` is non-empty, including `push`. 403/404 
   raw text for URL parsing.
 - Token and host reach the CLI only through env, never argv (asserted in tests).
 - Provider API keys are the caller's responsibility: the action passes the job environment
-  through unchanged and never sets, reads, or forwards them to the hosted API.
+  through to the CLI, adding only `EVALSHIFT_HOST`, `EVALSHIFT_TOKEN` and `COLUMNS=512`, and
+  never sets, reads, or forwards a provider key to the hosted API.
 
 ## Token hygiene (service-account keys)
 

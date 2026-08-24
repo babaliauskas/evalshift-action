@@ -715,6 +715,12 @@ def server_run_id_from_url(run_url: str) -> str:
     Anchored on the ``/runs/`` marker rather than taking whatever segment ends the path: a
     ``.../projects/<uuid>`` URL is the right shape and the wrong thing, and a deeper route such
     as ``.../runs/<a>/diff/<b>`` ends on the id of the *other* side of the comparison.
+
+    Matched against the RAW path, deliberately un-unquoted. Do not "restore" a ``unquote()``
+    here: decoding first would let a ``%2Fruns%2F<uuid>`` sequence inside some other segment
+    forge the very ``/runs/`` boundary this function exists to enforce. A genuinely
+    percent-encoded id is not something the CLI prints, and refusing one loudly is the safe
+    direction.
     """
     match = RUN_URL_ID_PATTERN.search(urlsplit(run_url).path)
     run_id = match.group(1) if match else ""
@@ -1108,7 +1114,10 @@ def http_request(
 
 
 def write_outputs(outputs: dict[str, Any], env: dict[str, str] | None = None) -> None:
-    output_path = (env or os.environ).get("GITHUB_OUTPUT")
+    # `is None`, not truthiness — same rule as `run_evalshift_commands`. An explicitly empty
+    # env means "no GITHUB_OUTPUT"; falling through to `os.environ` would hand a caller that
+    # asked for nothing the live runner's output file, which always has it set.
+    output_path = (os.environ if env is None else env).get("GITHUB_OUTPUT")
     if not output_path:
         return
     with Path(output_path).open("a", encoding="utf-8") as fh:

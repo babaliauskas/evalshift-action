@@ -292,6 +292,10 @@ def test_server_run_id_from_url_reads_the_segment_behind_runs(run_url: str) -> N
         # behind `/runs/` addresses a run, and a project id fed to `/runs/{id}` 404s exactly
         # like a missing policy decision.
         f"https://app.evalshift.dev/app/acme/projects/{SERVER_RUN_ID}",
+        # A percent-encoded `/runs/` inside another segment. This one is the reason the parse
+        # runs on the RAW path: unquoting first would decode this into a real `/runs/` boundary
+        # and hand back an id that never sat behind one. Restoring `unquote()` turns this red.
+        f"https://app.evalshift.dev/app/acme/project%2Fruns%2F{SERVER_RUN_ID}",
     ],
 )
 def test_server_run_id_from_url_refuses_anything_that_is_not_a_server_id(run_url: str) -> None:
@@ -332,6 +336,48 @@ def test_run_command_redacts_secret_output(
     assert "ghs_secret" not in captured.err
     assert "<redacted>" in captured.out
     assert "<redacted>" in captured.err
+
+
+def test_write_outputs_appends_key_value_lines(tmp_path: Path) -> None:
+    output = tmp_path / "github_output"
+
+    action.write_outputs(
+        {"run_id": SERVER_RUN_ID, "conclusion": "success"},
+        {"GITHUB_OUTPUT": str(output)},
+    )
+
+    assert output.read_text("utf-8") == f"run_id={SERVER_RUN_ID}\nconclusion=success\n"
+
+
+def test_write_outputs_given_an_empty_env_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicitly empty env means "no GITHUB_OUTPUT", not "go look at the real one".
+
+    Under a truthiness check this fell through to `os.environ`, where a real GitHub runner
+    always has `GITHUB_OUTPUT` set — so a caller asking for no output would have appended to
+    the live workflow's output file instead.
+    """
+    real_output = tmp_path / "real_github_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(real_output))
+
+    action.write_outputs({"run_id": SERVER_RUN_ID}, {})
+
+    assert not real_output.exists()
+
+
+def test_write_outputs_falls_back_to_the_process_env_when_none_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`None` is the real "I did not pass an env" signal, and `main()` relies on it."""
+    output = tmp_path / "github_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    action.write_outputs({"conclusion": "failure"})
+
+    assert output.read_text("utf-8") == "conclusion=failure\n"
 
 
 def test_hosted_client_calls_baseline_and_diff_endpoints() -> None:

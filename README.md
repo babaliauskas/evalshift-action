@@ -138,8 +138,10 @@ so a deploy does not race a credential change.
 ## Model provider API keys
 
 The action does not manage provider credentials. It passes the job environment
-through to the CLI unchanged, so set the key as a job `env:` entry and the CLI
-picks it up.
+through to the CLI, adding `EVALSHIFT_HOST`, `EVALSHIFT_TOKEN` and
+`COLUMNS=512` (the last so rich does not fold the hosted run URL across two
+lines) and touching nothing else, so set the key as a job `env:` entry and the
+CLI picks it up.
 
 | Provider  | Environment variable                  |
 | --------- | ------------------------------------- |
