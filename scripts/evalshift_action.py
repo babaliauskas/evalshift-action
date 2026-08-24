@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import quote, unquote, urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 COMMENT_MARKER = "<!-- evalshift:comment -->"
@@ -32,12 +32,17 @@ DEFAULT_FAIL_ON = "policy"
 # A run has two ids and they are not interchangeable. The local one names the directory under
 # `.evalshift/runs` and is what `evalshift push` takes as its argument; the server mints its
 # own at `POST /runs` and that is the only value `/runs/{id}` routes accept. The CLI prints the
-# hosted run URL and nothing else, so the server id reaches the action as its last path
-# segment — a canonical UUID, matched strictly so a truncated or unexpected URL is caught here
-# rather than as a puzzling 404 further down.
+# hosted run URL and nothing else, so the server id reaches the action as the path segment
+# behind `/runs/` — a canonical UUID, matched strictly so a truncated or unexpected URL is
+# caught here rather than as a puzzling 404 further down.
 SERVER_RUN_ID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+
+# Where in a hosted run URL's path that id lives. The `/runs/` marker is the whole point: any
+# URL has a last segment, but only the one behind `/runs/` addresses a run. The capture is
+# deliberately loose — `SERVER_RUN_ID_PATTERN` above is what decides whether it is a real id.
+RUN_URL_ID_PATTERN = re.compile(r"/runs/([0-9a-fA-F-]{36})(?:[/?#]|$)")
 
 # The CLI prints through Rich, which folds output at the console width — 80 columns whenever
 # stdout is a pipe, which it always is under `run_command`. A hosted run URL runs past 80
@@ -472,7 +477,10 @@ def run_evalshift_commands(
     env: dict[str, str] | None = None,
 ) -> EvalShiftRunResult:
     run = runner or run_command
-    command_env = dict(env or os.environ)
+    # `is None`, not truthiness: an explicitly empty env means "start from nothing", and a
+    # caller (a test, most of all) that asks for that must not silently get the real
+    # environment back — that inheritance is what lets a test pass with the lines below removed.
+    command_env = dict(os.environ if env is None else env)
     command_env["EVALSHIFT_HOST"] = config.host
     command_env["EVALSHIFT_TOKEN"] = config.token
     command_env["COLUMNS"] = CLI_CONSOLE_COLUMNS
@@ -703,14 +711,19 @@ def server_run_id_from_url(run_url: str) -> str:
     value, and a wrong one does not fail loudly: ``/runs/{id}/policy-check`` answers 404, which
     the gate reads as "this run has no stored policy decision" and degrades through. Better a
     named error here than a green check bought with the wrong id.
+
+    Anchored on the ``/runs/`` marker rather than taking whatever segment ends the path: a
+    ``.../projects/<uuid>`` URL is the right shape and the wrong thing, and a deeper route such
+    as ``.../runs/<a>/diff/<b>`` ends on the id of the *other* side of the comparison.
     """
-    last_segment = unquote(urlsplit(run_url).path.rstrip("/").rsplit("/", 1)[-1])
-    if not SERVER_RUN_ID_PATTERN.match(last_segment):
+    match = RUN_URL_ID_PATTERN.search(urlsplit(run_url).path)
+    run_id = match.group(1) if match else ""
+    if not SERVER_RUN_ID_PATTERN.match(run_id):
         raise ActionError(
             f"could not read a server run id out of the hosted run URL: {run_url!r} "
-            "(expected it to end in /runs/<uuid>)"
+            "(expected a /runs/<uuid> path segment)"
         )
-    return last_segment
+    return run_id
 
 
 def fetch_policy_check(hosted: Any, run_id: str) -> tuple[dict[str, Any] | None, str]:

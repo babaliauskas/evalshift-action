@@ -124,6 +124,20 @@ def test_latest_run_id_uses_most_recent_run_directory(tmp_path: Path) -> None:
 # that used one string for both could not catch the two being swapped.
 LOCAL_RUN_ID = "r_20260824_golden_ab12cd"
 SERVER_RUN_ID = "3f6b1c2e-9a4d-4f11-8c0e-2b7d5a19e8c4"
+# A second server id, for URLs that carry two — a diff route names both sides, and only the
+# one behind `/runs/` is the run being gated.
+OTHER_UUID = "8d21e7a0-5c63-4b98-9f04-6ae1cb37d250"
+SERVER_RUN_URL = f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}"
+
+
+def _fake_run_result() -> action.EvalShiftRunResult:
+    """What `run_evalshift_commands` really returns, for tests that stub it out.
+
+    Both ids are the realistic shapes: a stub that invented an id production can no longer
+    produce would still assert green if `main()` started keying its hosted calls on the local
+    run directory name again.
+    """
+    return action.EvalShiftRunResult(run_id=SERVER_RUN_ID, run_url=SERVER_RUN_URL)
 
 
 def _push_config(**overrides: Any) -> action.ActionConfig:
@@ -243,7 +257,10 @@ def test_run_evalshift_commands_widens_the_cli_console(tmp_path: Path) -> None:
 
     assert envs
     for env in envs:
-        assert int(env["COLUMNS"]) >= 200
+        # The exact value the action sets, not a range: a range is satisfied by whatever
+        # `COLUMNS` the developer's own terminal happens to export, which made this test pass
+        # with the production line deleted.
+        assert env["COLUMNS"] == action.CLI_CONSOLE_COLUMNS
 
 
 @pytest.mark.parametrize(
@@ -252,9 +269,12 @@ def test_run_evalshift_commands_widens_the_cli_console(tmp_path: Path) -> None:
         f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}",
         f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}/",
         f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}?from=ci",
+        # A deeper route under the same run: the id is the segment behind `/runs/`, not
+        # whatever happens to end the path.
+        f"https://app.evalshift.dev/app/acme/project/runs/{SERVER_RUN_ID}/diff/{OTHER_UUID}",
     ],
 )
-def test_server_run_id_from_url_reads_the_last_path_segment(run_url: str) -> None:
+def test_server_run_id_from_url_reads_the_segment_behind_runs(run_url: str) -> None:
     assert action.server_run_id_from_url(run_url) == SERVER_RUN_ID
 
 
@@ -268,6 +288,10 @@ def test_server_run_id_from_url_reads_the_last_path_segment(run_url: str) -> Non
         "https://app.evalshift.dev/app/acme-analytics/checkout-agent/runs/3f6b1c2e-9a4d-4",
         "https://app.evalshift.dev/app/acme/project",
         "",
+        # A UUID that is not a run id. Shape alone is not identity: nothing but the segment
+        # behind `/runs/` addresses a run, and a project id fed to `/runs/{id}` 404s exactly
+        # like a missing policy decision.
+        f"https://app.evalshift.dev/app/acme/projects/{SERVER_RUN_ID}",
     ],
 )
 def test_server_run_id_from_url_refuses_anything_that_is_not_a_server_id(run_url: str) -> None:
@@ -1389,7 +1413,7 @@ def test_an_allowed_preflight_lets_the_suite_run(
 
     def fake_run(*args: Any, **kwargs: Any) -> action.EvalShiftRunResult:
         ran.append(True)
-        return action.EvalShiftRunResult(run_id="run-1", run_url="https://app.test/run")
+        return _fake_run_result()
 
     monkeypatch.setattr(action, "run_evalshift_commands", fake_run)
     for key in list(os.environ):
@@ -1455,9 +1479,7 @@ def _policy_main(
     monkeypatch.setattr(
         action,
         "run_evalshift_commands",
-        lambda *args, **kwargs: action.EvalShiftRunResult(
-            run_id="run-1", run_url="https://app.test/run"
-        ),
+        lambda *args, **kwargs: _fake_run_result(),
     )
     for key in list(os.environ):
         if key.startswith(("INPUT_", "GITHUB_")):
@@ -1474,7 +1496,7 @@ def test_main_fails_the_job_on_a_failing_policy_without_any_diff(
     exit_code = _policy_main(monkeypatch, tmp_path, payload=_policy_payload("fail"))
 
     assert exit_code == 1
-    assert FakePolicyHostedClient.calls == ["run-1"]
+    assert FakePolicyHostedClient.calls == [SERVER_RUN_ID]
 
 
 def test_main_passes_the_job_on_a_passing_policy(
@@ -1484,7 +1506,7 @@ def test_main_passes_the_job_on_a_passing_policy(
     exit_code = _policy_main(monkeypatch, tmp_path, payload=_policy_payload("pass"))
 
     assert exit_code == 0
-    assert FakePolicyHostedClient.calls == ["run-1"]
+    assert FakePolicyHostedClient.calls == [SERVER_RUN_ID]
 
 
 def test_main_passes_the_job_on_a_conditional_pass_and_logs_the_caveat(

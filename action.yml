@@ -68,7 +68,9 @@ outputs:
     description: Hosted diff URL when a compatible baseline exists.
     value: ${{ steps.run.outputs.diff_url }}
   run_id:
-    description: EvalShift run id.
+    description: >-
+      Hosted EvalShift run id - the server-minted id every /runs/{id} API route takes.
+      Not the local r_... run directory name.
     value: ${{ steps.run.outputs.run_id }}
   regression_count:
     description: Number of regressed examples in the hosted diff.

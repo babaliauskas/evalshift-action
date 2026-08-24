@@ -95,7 +95,7 @@ false. All inputs are `.strip()`ed.
 |---|---|
 | run_url | Hosted run URL, parsed as the last http(s) line of `evalshift push` stdout. Empty is impossible — a push that prints no URL is a hard error. |
 | diff_url | Hosted `web_diff_url` for the baseline comparison; empty string when no compatible baseline. |
-| run_id | Hosted run id — the server-minted UUID, read off the end of `run_url`. NOT the local run directory name (`r_20260723_mysuite_ab12cd`), which addresses nothing beyond the runner's own disk. |
+| run_id | Hosted run id — the server-minted UUID, read out of the `/runs/<uuid>` segment of `run_url`. NOT the local run directory name (`r_20260723_mysuite_ab12cd`), which addresses nothing beyond the runner's own disk. |
 | regression_count | `aggregate_delta.regressions` from the hosted diff; `0` when no baseline. |
 | conclusion | `success` or `failure`, after applying `fail-on`. It is a GitHub commit-status state, so both a `conditional_pass` and an undecided policy (`inconclusive` or an unknown status) read `success` here; the PR comment and the status description carry the verdict. |
 
@@ -127,11 +127,13 @@ EvalShift runs found in ...`.
 this (guarded by the `cli-contract` CI job, which only checks flags, not output shape).
 
 The HOSTED run id — the `run_id` output, and the id in every `/runs/{id}` call below — is the
-last path segment of that `run_url` (`.../runs/<uuid>`), because the server mints it and the
-URL is the only place `push` reports it. It must match the canonical UUID shape or the step
-fails with `could not read a server run id out of the hosted run URL: ...`; guessing would
-buy a 404 on `policy-check`, which the gate reads as "no stored policy decision" and degrades
-past. The local `r_…` id is never sent to the API.
+path segment immediately after `/runs/` in that `run_url`, because the server mints it and the
+URL is the only place `push` reports it. It is anchored on the `/runs/` marker, not simply
+taken off the end: a `.../projects/<uuid>` URL is the right shape and the wrong thing, and
+`.../runs/<a>/diff/<b>` ends on the other side of the comparison. It must match the canonical
+UUID shape or the step fails with `could not read a server run id out of the hosted run URL:
+...`; guessing would buy a 404 on `policy-check`, which the gate reads as "no stored policy
+decision" and degrades past. The local `r_…` id is never sent to the API.
 
 ## Plan preflight (runs BEFORE the CLI)
 

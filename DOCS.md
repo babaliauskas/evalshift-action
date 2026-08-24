@@ -204,7 +204,9 @@ from should show up dead there within the grace window.
 ## Secrets and provider keys
 
 The action does **not** manage provider credentials. It passes the job environment through to
-the CLI unchanged, so set the key as a job-level `env:` entry and the CLI picks it up.
+the CLI, adding `EVALSHIFT_HOST`, `EVALSHIFT_TOKEN` and `COLUMNS=512` (the last so rich does
+not fold the hosted run URL across two lines) and touching nothing else, so set the key as a
+job-level `env:` entry and the CLI picks it up.
 
 | Provider  | Environment variable                 |
 | --------- | ------------------------------------ |
@@ -705,10 +707,10 @@ Worth knowing before you rely on this in anger:
 - **The run that gets pushed is the newest directory under `.evalshift/runs`.** If a step
   between the run and the push touches an older run directory's mtime, the wrong run gets
   pushed. In a normal workflow this never happens.
-- **The hosted run URL is parsed from CLI stdout, and the hosted run id is read off the end of
-  it.** A CLI release that changes how the push result is printed would break both. The repo's
-  `cli-contract` CI job guards flag renames but not output shape; a URL the action cannot read
-  a run id out of fails the step rather than gating on a guess.
+- **The hosted run URL is parsed from CLI stdout, and the hosted run id is read out of its
+  `/runs/<uuid>` segment.** A CLI release that changes how the push result is printed would
+  break both. The repo's `cli-contract` CI job guards flag renames but not output shape; a URL
+  the action cannot read a run id out of fails the step rather than gating on a guess.
 - **No retries on hosted API calls.** A 30-second timeout, one attempt. A transient hosted
   outage fails the step rather than silently passing — deliberate, but it means a flaky network
   reads as a failed job.
@@ -754,6 +756,14 @@ that redirects run artifacts elsewhere, or a working-directory mismatch.
 
 The push didn't emit a URL on its last output line. Run `evalshift push <run-id>` locally
 against the same host and see what it prints. Also check for a CLI version mismatch.
+
+### `could not read a server run id out of the hosted run URL: ...`
+
+The push printed a URL, but the action could not find a `/runs/<uuid>` segment in it. Every
+hosted call afterwards is keyed on that id, so the action stops rather than gate on a guess.
+Usually a CLI version mismatch — an older CLI printed the local `r_…` run directory name in the
+URL instead of the server-minted id. Check the printed URL in the step log and pin a newer
+`evalshift-version`.
 
 ### HTTP 401 from the hosted API
 
