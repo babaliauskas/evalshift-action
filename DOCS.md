@@ -324,15 +324,22 @@ before merging."* — and the action passes that through verbatim. It does not f
 it is not treated as undecided: the check is green, with a blockquote saying the run is not
 clean and pointing at the reason.
 
-**`inconclusive` has three distinct causes**, carried only by the `reason` string:
+**`inconclusive` has six distinct causes**, carried only by the `reason` string:
 
-1. no policy metrics were recorded for the run at all;
-2. nothing was comparable — every comparison scored severity `insufficient`;
-3. a slice your policy declares was not measured by this run.
+1. no policy is configured on the project — there were no budgets to check, and
+   `policy` is `null` with `budgets: []`;
+2. no policy metrics were recorded for the run at all;
+3. nothing was measured — no blocking evaluator scored a single record, so the quality
+   budgets are clean by absence rather than by evidence;
+4. nothing was comparable — every comparison scored severity `insufficient`;
+5. a budget was breached, but on too small a sample to confirm the breach;
+6. a slice your policy declares was not measured by this run.
 
 The action never substitutes its own wording for these. It prints the server's `reason`
-verbatim in the PR comment, because paraphrasing would collapse three different problems — and
-three different fixes — into one sentence on the surface you actually read.
+verbatim in the PR comment, because paraphrasing would collapse six different problems — and
+six different fixes — into one sentence on the surface you actually read. It is also why the
+list growing (it went from three to six when the gate stopped inventing a default policy)
+changes nothing the action has to ship: it never enumerated them in code.
 
 **When the policy declines to answer.** `inconclusive` — and any status outside the four above,
 which a newer server may return to an older pinned action — **does not fail the job**, and is

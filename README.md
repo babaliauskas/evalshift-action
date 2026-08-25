@@ -206,7 +206,7 @@ The policy answers with one of four statuses. Only one of them fails the job:
 | `pass` | merges | Every budget is within policy. |
 | `conditional_pass` | merges | Every budget held and nothing critical or high regressed, but medium/low regressions and/or comparisons that scored zero pairs came with it. A pass with caveats — deliberately **not** a gate failure. The comment says so and prints the server's reason; read it before merging. |
 | `fail` | **blocks** | A budget was busted, or a critical/high regression is blocking. |
-| `inconclusive` | merges | The policy could not decide. Never rendered as a pass — the comment and the commit status say the gate did not decide. Three different causes produce this, and only the server's `reason` string tells them apart, so the action prints that reason verbatim rather than paraphrasing it. |
+| `inconclusive` | merges | The policy could not decide. Never rendered as a pass — the comment and the commit status say the gate did not decide. Six different causes produce this — including a project with no policy configured at all, and a run in which no blocking evaluator scored a single record — and only the server's `reason` string tells them apart, so the action prints that reason verbatim rather than paraphrasing it. |
 
 Any status outside those four is something a newer server grew that this pinned
 version of the action has never seen. It is handled like `inconclusive`: it does

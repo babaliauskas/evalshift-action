@@ -224,11 +224,15 @@ stdlib `urllib`. The preflight calls above use the same client and headers.
      deliberately does not fail the gate. Its `reason` contains "not a gate failure" and ends
      "Review before merging."
    - `fail` — a budget busted, or a blocking critical/high regression.
-   - `inconclusive` — three distinct causes, distinguishable ONLY by `reason`: (1) no policy
-     metrics recorded for the run; (2) nothing comparable — every comparison scored severity
-     `insufficient`, which also returns `budgets: []`; (3) a policy-declared slice went
-     unmeasured. The action prints `reason` verbatim and never paraphrases it, or the three
-     collapse into one on the surface readers see.
+   - `inconclusive` — six distinct causes, distinguishable ONLY by `reason`: (1) the project
+     has no policy configured, which returns `policy: null` and `budgets: []`; (2) no policy
+     metrics recorded for the run; (3) nothing measured — no blocking evaluator scored a
+     record, so the quality budgets are clean by absence; (4) nothing comparable — every
+     comparison scored severity `insufficient`, which also returns `budgets: []`; (5) a budget
+     breached on too small a sample to confirm it; (6) a policy-declared slice went unmeasured.
+     The action prints `reason` verbatim and never paraphrases it, or the six collapse into one
+     on the surface readers see. The list has grown before and may again; nothing in the action
+     enumerates it.
    A string outside those four means a newer server; the action treats it exactly like
    `inconclusive` (undecided, never a pass) so a pinned version keeps working.
    `budgets[]` may exceed six entries and `scope` may be a slice name rather than `overall`; it
