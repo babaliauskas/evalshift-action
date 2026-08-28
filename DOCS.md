@@ -5,7 +5,7 @@ request it runs the suite against both models, pushes the result to hosted EvalS
 it to the latest run on your base branch, and fails the check when your migration policy says
 the candidate is not safe to ship.
 
-- **Action ref:** `babaliauskas/evalshift-action@v0` · **version:** 0.1.0 · **License:** MIT
+- **Action ref:** `babaliauskas/evalshift-action@v0` · **version:** 0.3.0 · **License:** MIT
 - **Kind:** composite action — installs Python + the pinned EvalShift CLI, then runs a small
   stdlib-only helper script. Nothing is compiled, nothing is containerised.
 - **Pinned CLI:** `evalshift==0.12.1` by default, overridable.
@@ -854,7 +854,7 @@ CI suite, or swap LLM-judge evaluators for structural ones in a CI-specific conf
 
 ## Versioning and stability
 
-Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.1.0` for a fully
+Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.3.0` for a fully
 reproducible workflow. The `evalshift-version` input pins the CLI separately — pin both if you
 want a workflow that behaves identically six months from now.
 

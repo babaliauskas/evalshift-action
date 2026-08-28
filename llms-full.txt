@@ -1,7 +1,7 @@
 # evalshift-action (GitHub Action) — complete reference for AI tools
 
 Canonical hosted copy: https://www.evalshift.dev/ci-llms-full.txt
-Repo/action ref: babaliauskas/evalshift-action | version: 0.1.0 | license: MIT
+Repo/action ref: babaliauskas/evalshift-action | version: 0.3.0 | license: MIT
 Kind: composite GitHub Action (not JavaScript, not Docker)
 Marketplace name: "EvalShift" | branding: bar-chart-2 / purple
 Runtime helper: scripts/evalshift_action.py (stdlib only, no third-party deps)
@@ -641,6 +641,6 @@ Costs higher than expected → the runner has a cold CLI cache every run; narrow
 
 ## Versioning
 
-`@v0` tracks the latest v0.x. `@v0.1.0` pins exactly. `evalshift-version` pins the CLI
+`@v0` tracks the latest v0.x. `@v0.3.0` pins exactly. `evalshift-version` pins the CLI
 independently of the action tag — pin both for a fully reproducible workflow.
 License: MIT (the EvalShift CLI it installs is licensed separately, AGPL-3.0-or-later).
