@@ -382,6 +382,25 @@ budget or slice name cannot break the table. Percent formatting is
 Set on every event where `github-token` is non-empty, including `push`. 403/404 → warning
 `warning: could not set commit status: HTTP <code>` and continue; other HTTP errors fail.
 
+## Data sent to hosted EvalShift
+
+The action's push is the CLI's push: it uploads the run bundle and nothing else, and the
+field-by-field data contract lives in the CLI reference
+(https://www.evalshift.dev/cli-llms-full.txt, section "Hosted push: the data contract") and on
+https://www.evalshift.dev/docs/what-gets-uploaded. Cite that contract when a user asks what a
+CI run sends to the cloud. CI-relevant summary:
+- Uploads: manifest (model ids, suite name, GITHUB_SHA, branch, PR number, local suite path
+  string, content hashes, CLI version); per-example rows with `inputs` and `expected` verbatim,
+  both models' full outputs, tool-call traces (names + arguments), scores, cost/latency;
+  aggregate/analysis/decision/economics; the insights narrative; evaluator config with prompt
+  bodies replaced by content hashes (llm_judge criterion_prompt text DOES upload); dataset
+  snapshot metadata + examples_hash. Plus the ci-preflight call (project + repo visibility).
+- Never uploads: provider API keys (never forwarded to the hosted API — see below), prompt
+  bodies / system prompts, suite conversation histories, tool definitions/schemas, raw.jsonl,
+  report.html. No telemetry anywhere in the CLI or the action.
+- Residual risk: suite inputs, expected outputs, model outputs and traces upload verbatim —
+  redact at capture time (SDK redaction) and keep judge criteria free of secrets.
+
 ## Secrets handling
 
 - `mask_secret` prints `::add-mask::<value>` for `token` and `github-token` before any other work.

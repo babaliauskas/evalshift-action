@@ -269,6 +269,18 @@ run — the gate still works.
    instead of stacking), and sets the `evalshift/regression` commit status.
 7. Exits non-zero when the gate says so — the hosted policy verdict under `fail-on: policy`, the diff otherwise.
 
+## Data sent to hosted EvalShift
+
+The action's push is the CLI's push: it uploads the run bundle and nothing else. The
+field-by-field contract of what that bundle contains — and what never leaves the runner
+(provider API keys, prompt bodies, system prompts, conversation histories, raw provider
+responses) — is documented in
+[What gets uploaded](https://www.evalshift.dev/docs/what-gets-uploaded). Suite `inputs`,
+`expected` outputs, both models' outputs, and tool-call traces upload verbatim, so redact
+sensitive values at capture time before they reach the golden suite. Neither the CLI nor the
+action carries any telemetry; besides the push, the only hosted call the action adds is the
+[plan preflight](#plan-limits) (project slug + repository visibility).
+
 ## Plan limits
 
 Some plan limits are cheaper to discover before the suite runs than halfway through it, so the
