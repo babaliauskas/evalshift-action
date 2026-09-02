@@ -859,10 +859,32 @@ reproducible workflow. The `evalshift-version` input pins the CLI separately —
 want a workflow that behaves identically six months from now.
 
 This repo's CI includes a `cli-contract` job that installs the exact pinned CLI version and
-asserts the command-line surface the action depends on still exists. It costs nothing (no API
-keys, no model credits) and it's the early-warning system for CLI drift. A separate manual
-`dogfood` workflow exercises the whole path — install, run, hosted push, baseline lookup,
-outputs — against a four-example fixture project; it's manual because it spends real credits.
+runs `scripts/cli_contract.sh` to assert the command-line surface the action depends on still
+exists. It costs nothing (no API keys, no model credits) and it's the early-warning system for
+CLI drift. A separate manual `dogfood` workflow exercises the whole path — install, run, hosted
+push, baseline lookup, outputs — against a four-example fixture project; it's manual because it
+spends real credits.
+
+The `evalshift-version` default in `action.yml` is the single source of truth for the pinned
+CLI. Every other mention (README, this document, `llms-full.txt`) is asserted equal by
+`tests/test_pin_consistency.py`, and `scripts/bump_cli_pin.py <new-version>` rewrites all of
+them plus the action's patch version in `pyproject.toml`. The pin is kept current by
+`.github/workflows/bump-cli-pin.yml`: it runs daily (polling PyPI for the latest release), on
+`workflow_dispatch` with an optional `version` input, or on `repository_dispatch` of type
+`evalshift-cli-release`. Before opening anything it checks the target's `requires-python`
+against the `python-version` default, installs the target CLI and runs the contract script, then
+runs the bump script and the test suite; only then does it open a PR on branch
+`bump/evalshift-<version>` titled `chore(pin): evalshift <old> → <new>`. The optional
+`BUMP_PR_TOKEN` secret (a fine-grained PAT with `contents` and `pull-requests` write) lets the
+normal CI run on that PR — a PR opened with `GITHUB_TOKEN` does not trigger `ci.yml`; without the
+secret the PR still opens, pre-validated.
+
+Merging a PR that bumps `version` in `pyproject.toml` *is* the release — there are no manual
+tags. On every push to `main`, `.github/workflows/release.yml` creates `v<version>` on the merge
+commit if it does not exist yet, force-moves the floating `v0` tag to the same commit (only `v0`
+is ever moved), and publishes a GitHub Release with generated notes since the previous `v0.*`
+tag; ordinary merges stop green. So a merged bump PR reaches every `@v0` consumer immediately.
+The workflow refuses a major other than `0` — a 1.x release needs a `v1` tag and a docs change.
 
 The action is MIT licensed. The EvalShift CLI it installs is licensed separately
 (AGPL-3.0-or-later).

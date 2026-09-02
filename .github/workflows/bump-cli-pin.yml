@@ -1,0 +1,183 @@
+name: bump-cli-pin
+
+# Keeps the `evalshift-version` default in action.yml (the single source of
+# truth for the pinned CLI) current with PyPI. Resolves the target version,
+# pre-validates it against this repo, then opens a PR via
+# scripts/bump_cli_pin.py. A bump PR must never be red on arrival, so every
+# check runs before anything is pushed.
+
+on:
+  schedule:
+    # Daily, off-peak UTC. PyPI is polled, so this works even while CLI
+    # releases stay manual.
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: EvalShift CLI version to pin (empty = latest on PyPI)
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [evalshift-cli-release]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    env:
+      # Same reasons as the cli-contract job in ci.yml: plain `--help` bytes.
+      COLUMNS: "200"
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve current pin and target version
+        id: resolve
+        env:
+          # Read via env, never interpolated into the script, so a crafted
+          # dispatch payload cannot inject shell.
+          REQUESTED: ${{ github.event.inputs.version || github.event.client_payload.version || '' }}
+        run: |
+          set -euo pipefail
+          read_default() {
+            awk -v key="  $1:" '
+              $0 == key { found = 1; next }
+              found && /default:/ { gsub(/["[:space:]]/, "", $2); print $2; exit }
+            ' action.yml
+          }
+          current="$(read_default evalshift-version)"
+          python="$(read_default python-version)"
+          test -n "$current" || { echo "::error::could not read evalshift-version from action.yml"; exit 1; }
+          test -n "$python" || { echo "::error::could not read python-version from action.yml"; exit 1; }
+
+          if [ -n "$REQUESTED" ]; then
+            target="$REQUESTED"
+          else
+            target="$(curl -fsSL --retry 3 https://pypi.org/pypi/evalshift/json | jq -r .info.version)"
+          fi
+          if ! [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::target version '$target' is not X.Y.Z"
+            exit 1
+          fi
+
+          # Per-version JSON: 404s for a version that does not exist on PyPI,
+          # and carries that version's own requires_python.
+          requires_python="$(curl -fsSL --retry 3 "https://pypi.org/pypi/evalshift/${target}/json" | jq -r '.info.requires_python // ""')"
+
+          {
+            echo "current=$current"
+            echo "target=$target"
+            echo "python=$python"
+            echo "requires_python=$requires_python"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$current" = "$target" ]; then
+            echo "::notice::action.yml already pins evalshift==${current}; nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bump: evalshift ${current} -> ${target} (requires_python: '${requires_python:-unspecified}', action python-version: ${python})"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v7
+        if: steps.resolve.outputs.skip != 'true'
+        with:
+          python-version: ${{ steps.resolve.outputs.python }}
+
+      - name: Check requires-python against the action's python-version default
+        if: steps.resolve.outputs.skip != 'true'
+        env:
+          REQUIRES_PYTHON: ${{ steps.resolve.outputs.requires_python }}
+          ACTION_PYTHON: ${{ steps.resolve.outputs.python }}
+          TARGET: ${{ steps.resolve.outputs.target }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install packaging
+          python -c '
+          import os, sys
+          from packaging.specifiers import SpecifierSet
+          from packaging.version import Version
+
+          spec, py, target = os.environ["REQUIRES_PYTHON"], os.environ["ACTION_PYTHON"], os.environ["TARGET"]
+          if not spec:
+              print(f"evalshift {target} declares no requires_python; python-version {py} accepted")
+              sys.exit(0)
+          if Version(py) in SpecifierSet(spec):
+              print(f"requires-python OK: evalshift {target} needs {spec}; action.yml python-version default is {py}")
+              sys.exit(0)
+          print(
+              f"::error::evalshift {target} requires Python {spec} but the python-version default in "
+              f"action.yml is {py}. Raise python-version in action.yml (and its docs) in the same change, "
+              "then re-run this workflow."
+          )
+          sys.exit(1)
+          '
+
+      - name: Install the target EvalShift CLI
+        if: steps.resolve.outputs.skip != 'true'
+        run: python -m pip install "evalshift==${{ steps.resolve.outputs.target }}"
+
+      - name: Assert the command surface the action depends on
+        if: steps.resolve.outputs.skip != 'true'
+        run: bash scripts/cli_contract.sh
+
+      - name: Install uv
+        if: steps.resolve.outputs.skip != 'true'
+        uses: astral-sh/setup-uv@v8.3.2
+
+      - name: Rewrite every pin site
+        if: steps.resolve.outputs.skip != 'true'
+        run: python scripts/bump_cli_pin.py "${{ steps.resolve.outputs.target }}"
+
+      - name: Run the test suite against the rewritten tree
+        if: steps.resolve.outputs.skip != 'true'
+        run: uv run pytest
+
+      - name: Write the PR body
+        if: steps.resolve.outputs.skip != 'true'
+        env:
+          CURRENT: ${{ steps.resolve.outputs.current }}
+          TARGET: ${{ steps.resolve.outputs.target }}
+          ACTION_PYTHON: ${{ steps.resolve.outputs.python }}
+          REQUIRES_PYTHON: ${{ steps.resolve.outputs.requires_python }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/pr-body.md" <<EOF
+          Bumps the pinned EvalShift CLI from \`${CURRENT}\` to \`${TARGET}\` in every site
+          (\`action.yml\`, README, DOCS.md, llms-full.txt) and bumps the action's patch version.
+
+          CLI changes: https://github.com/babaliauskas/EvalShift/blob/main/CHANGELOG.md
+
+          Pre-validation (run before this PR was opened, by \`.github/workflows/bump-cli-pin.yml\`):
+
+          - requires-python OK: evalshift ${TARGET} needs \`${REQUIRES_PYTHON:-unspecified}\`; the action's \`python-version\` default is \`${ACTION_PYTHON}\`
+          - contract OK: \`scripts/cli_contract.sh\` passed against \`evalshift==${TARGET}\`
+          - pytest OK: \`uv run pytest\` passed on the rewritten tree (includes \`tests/test_pin_consistency.py\`)
+
+          Merging bumps the action's version, so this ships to every \`@v0\` consumer on merge.
+          Tagging \`v<version>\`, moving \`v0\`, and the GitHub Release are done by \`release.yml\` on merge.
+          EOF
+          cat "$RUNNER_TEMP/pr-body.md"
+
+      - name: Open or update the bump PR
+        if: steps.resolve.outputs.skip != 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          # A PR opened with GITHUB_TOKEN does not trigger ci.yml. Set the
+          # optional BUMP_PR_TOKEN fine-grained PAT (contents + pull-requests
+          # write on this repo) so the normal CI runs on the PR; without it the
+          # PR still opens, pre-validated by the steps above.
+          token: ${{ secrets.BUMP_PR_TOKEN || github.token }}
+          branch: bump/evalshift-${{ steps.resolve.outputs.target }}
+          delete-branch: true
+          commit-message: "chore(pin): evalshift ${{ steps.resolve.outputs.current }} → ${{ steps.resolve.outputs.target }}"
+          title: "chore(pin): evalshift ${{ steps.resolve.outputs.current }} → ${{ steps.resolve.outputs.target }}"
+          body-path: ${{ runner.temp }}/pr-body.md

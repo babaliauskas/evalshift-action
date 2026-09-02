@@ -1,0 +1,95 @@
+name: release
+
+# Releases the action whenever a merge to main bumps `version` in
+# pyproject.toml. Merging that bump *is* the release: this workflow tags
+# `v<version>` on the merge commit, force-moves the floating `v0` tag to the
+# same commit (so every `@v0` consumer picks the change up immediately), and
+# publishes a GitHub Release with notes since the previous `v0.*` tag.
+# Ordinary merges, where `v<version>` already exists, stop green.
+#
+# Only `v0` is ever force-pushed. Exact tags (`vX.Y.Z`) are created once and
+# never moved. The major must be 0: moving `v0` onto a 1.x commit would be
+# wrong, and that day needs a `v1` tag plus a README change.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          version="$(sed -n -E 's/^version = "([^"]+)"[[:space:]]*$/\1/p' pyproject.toml | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "::error file=pyproject.toml::could not read a version = \"X.Y.Z\" line"
+            exit 1
+          fi
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error file=pyproject.toml::version '$version' is not X.Y.Z"
+            exit 1
+          fi
+          major="${version%%.*}"
+          if [ "$major" != "0" ]; then
+            echo "::error file=pyproject.toml::version $version has major $major; this workflow only moves the v0 tag. A 1.x release needs a v1 tag and a README change."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the release tag already exists
+        id: existing
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::notice::$TAG already exists at $(git rev-parse "refs/tags/$TAG^{commit}"); nothing to release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$TAG does not exist yet; releasing $GITHUB_SHA as $TAG."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag the release and move v0
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "evalshift-action $TAG" "$GITHUB_SHA"
+          git tag -fa v0 -m "evalshift-action v0 -> $TAG" "$GITHUB_SHA"
+          # Exact tags are pushed normally and never moved; only v0 is forced.
+          git push origin "refs/tags/$TAG"
+          git push --force origin refs/tags/v0
+          git tag -l --format='%(refname:short) %(objectname:short) -> %(*objectname:short)' "$TAG" v0
+
+      - name: Create GitHub Release
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Notes cover everything since the previous exact v0.* tag (v0 itself
+          # is a floating pointer, not a release boundary).
+          previous="$(git tag -l 'v0.*' --sort=-v:refname | grep -vx "$TAG" | head -n 1)"
+          args=(--title "$TAG" --generate-notes --verify-tag)
+          if [ -n "$previous" ]; then
+            echo "Generating notes since $previous"
+            args+=(--notes-start-tag "$previous")
+          fi
+          gh release create "$TAG" "${args[@]}"

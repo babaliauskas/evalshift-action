@@ -24,7 +24,6 @@ from urllib.request import Request, urlopen
 COMMENT_MARKER = "<!-- evalshift:comment -->"
 STATUS_CONTEXT = "evalshift/regression"
 DEFAULT_HOST = "https://api.evalshift.dev"
-DEFAULT_EVALSHIFT_VERSION = "0.12.1"
 
 FAIL_ON_MODES = ("never", "regression", "any-slice-regression", "policy")
 DEFAULT_FAIL_ON = "policy"
@@ -130,6 +129,11 @@ class ActionConfig:
         token = _input(source, "TOKEN")
         if not token:
             raise ActionError("input 'token' is required")
+        evalshift_version = _input(source, "EVALSHIFT_VERSION")
+        if not evalshift_version:
+            # action.yml always passes its default through, so an empty value means the
+            # script was run outside the action. The pin lives only in action.yml.
+            raise ActionError("input 'evalshift-version' is required")
         fail_on = _input(source, "FAIL_ON", DEFAULT_FAIL_ON)
         if fail_on not in FAIL_ON_MODES:
             raise ActionError(f"input 'fail-on' must be one of: {', '.join(FAIL_ON_MODES)}")
@@ -138,7 +142,7 @@ class ActionConfig:
             host=_input(source, "HOST", DEFAULT_HOST).rstrip("/"),
             config=_input(source, "CONFIG", "evalshift.yaml"),
             suite=_input(source, "SUITE", "golden.jsonl"),
-            evalshift_version=_input(source, "EVALSHIFT_VERSION", DEFAULT_EVALSHIFT_VERSION),
+            evalshift_version=evalshift_version,
             fail_on=fail_on,
             branch=_input(source, "BRANCH", ""),
             base_branch=_input(source, "BASE_BRANCH", ""),
