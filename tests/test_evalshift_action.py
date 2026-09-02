@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import evalshift_action as action
+from _manifest import manifest_input_default
 
 
 def test_action_manifest_quotes_descriptions_with_colons() -> None:
@@ -30,31 +31,18 @@ def test_action_manifest_quotes_descriptions_with_colons() -> None:
     assert offenders == []
 
 
-def _manifest_input_default(name: str) -> str:
-    """Read an input default out of action.yml without a YAML dependency."""
-    manifest = Path(__file__).resolve().parents[1] / "action.yml"
-    lines = manifest.read_text(encoding="utf-8").splitlines()
-    for index, line in enumerate(lines):
-        if line.strip() != f"{name}:":
-            continue
-        for follower in lines[index + 1 :]:
-            stripped = follower.strip()
-            if stripped.startswith("default:"):
-                return stripped.removeprefix("default:").strip().strip("\"'")
-            if follower and not follower.startswith("    "):
-                break
-    raise AssertionError(f"no default found for input '{name}' in action.yml")
+def test_action_config_requires_evalshift_version() -> None:
+    """action.yml always supplies the version; an empty input means the script ran outside it."""
+    with pytest.raises(action.ActionError, match="input 'evalshift-version' is required"):
+        action.ActionConfig.from_env({"INPUT_TOKEN": "es_secret"})
 
 
-def test_script_default_version_matches_action_manifest() -> None:
-    """The manifest always supplies the version, but a drifting fallback misleads readers."""
-    assert _manifest_input_default("evalshift-version") == action.DEFAULT_EVALSHIFT_VERSION
+def test_action_config_reads_evalshift_version_input() -> None:
+    config = action.ActionConfig.from_env(
+        {"INPUT_TOKEN": "es_secret", "INPUT_EVALSHIFT_VERSION": "0.13.1"}
+    )
 
-
-def test_action_config_defaults_to_current_evalshift_release() -> None:
-    config = action.ActionConfig.from_env({"INPUT_TOKEN": "es_secret"})
-
-    assert config.evalshift_version == "0.12.1"
+    assert config.evalshift_version == "0.13.1"
 
 
 def test_detect_context_uses_pull_request_event_payload(tmp_path: Path) -> None:
@@ -528,18 +516,26 @@ REGRESSED_DIFF: dict[str, Any] = {
 
 
 def test_action_config_defaults_to_the_governed_policy_gate() -> None:
-    config = action.ActionConfig.from_env({"INPUT_TOKEN": "es_secret"})
+    config = action.ActionConfig.from_env(
+        {"INPUT_TOKEN": "es_secret", "INPUT_EVALSHIFT_VERSION": "1.2.3"}
+    )
 
     assert config.fail_on == "policy"
 
 
 def test_manifest_fail_on_default_matches_the_script_default() -> None:
-    assert _manifest_input_default("fail-on") == "policy"
+    assert manifest_input_default("fail-on") == "policy"
 
 
 def test_action_config_rejects_an_unknown_fail_on_mode() -> None:
     with pytest.raises(action.ActionError) as excinfo:
-        action.ActionConfig.from_env({"INPUT_TOKEN": "es_secret", "INPUT_FAIL_ON": "sometimes"})
+        action.ActionConfig.from_env(
+            {
+                "INPUT_TOKEN": "es_secret",
+                "INPUT_EVALSHIFT_VERSION": "1.2.3",
+                "INPUT_FAIL_ON": "sometimes",
+            }
+        )
 
     message = str(excinfo.value)
     for mode in ("never", "regression", "any-slice-regression", "policy"):
@@ -1451,6 +1447,7 @@ def test_a_denied_preflight_fails_the_job_without_running_the_suite(
         if key.startswith(("INPUT_", "GITHUB_")):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("INPUT_TOKEN", "es_secret")
+    monkeypatch.setenv("INPUT_EVALSHIFT_VERSION", "1.2.3")
     monkeypatch.setenv("INPUT_REPO_PRIVATE", "true")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
 
@@ -1484,6 +1481,7 @@ def test_an_allowed_preflight_lets_the_suite_run(
         if key.startswith(("INPUT_", "GITHUB_")):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("INPUT_TOKEN", "es_secret")
+    monkeypatch.setenv("INPUT_EVALSHIFT_VERSION", "1.2.3")
     monkeypatch.setenv("INPUT_REPO_PRIVATE", "false")
 
     exit_code = action.main()
@@ -1494,7 +1492,7 @@ def test_an_allowed_preflight_lets_the_suite_run(
 
 
 def test_repo_private_input_defaults_to_the_github_context() -> None:
-    assert _manifest_input_default("repo-private") == "${{ github.event.repository.private }}"
+    assert manifest_input_default("repo-private") == "${{ github.event.repository.private }}"
 
 
 class FakePolicyHostedClient:
@@ -1549,6 +1547,7 @@ def _policy_main(
         if key.startswith(("INPUT_", "GITHUB_")):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("INPUT_TOKEN", "es_secret")
+    monkeypatch.setenv("INPUT_EVALSHIFT_VERSION", "1.2.3")
     return action.main()
 
 

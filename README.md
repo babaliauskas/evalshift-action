@@ -309,7 +309,8 @@ private stays private.
 baseline diff lookup, and action outputs.
 
 It is manual (`workflow_dispatch`) because each run spends real model credits.
-Routine CLI drift is covered for free by the `cli-contract` job in `ci.yml`;
+Routine CLI drift is covered for free by the `cli-contract` job in `ci.yml`
+(it installs the pinned CLI and runs `scripts/cli_contract.sh`);
 this workflow is for verifying the whole path, including the hosted API
 contract. It gates with `fail-on: never` so a genuine regression in the fixture
 suite does not red this repository. Set the `EVALSHIFT_TOKEN` and a model
@@ -320,6 +321,57 @@ skips.
 
 Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.3.0` for
 a fully reproducible workflow.
+
+### How the pin is maintained
+
+The `evalshift-version` default in `action.yml` is the single source of truth for
+the pinned CLI. Every other mention (this README, `DOCS.md`, `llms-full.txt`) is
+asserted equal by `tests/test_pin_consistency.py`, so a stale literal fails
+`uv run pytest`. `scripts/bump_cli_pin.py <new-version>` rewrites every site and
+bumps the action's patch version.
+
+`.github/workflows/bump-cli-pin.yml` runs that script and opens the PR
+(branch `bump/evalshift-<version>`, title `chore(pin): evalshift <old> → <new>`;
+re-running updates the same branch). It stops green when `action.yml` already
+pins the target. Otherwise the PR is pre-validated before it opens, so it is
+never red on arrival:
+
+1. the target's `requires_python` (from PyPI) is checked against the
+   `python-version` default in `action.yml` — a mismatch fails with a clear
+   error, because that bump needs a human to raise `python-version` too;
+2. the target CLI is installed and `scripts/cli_contract.sh` run against it;
+3. `scripts/bump_cli_pin.py` rewrites every site and `uv run pytest` passes on
+   the rewritten tree.
+
+Merging the PR ships the new pin to every `@v0` consumer (see
+[Releases](#releases)). Triggers:
+
+- `schedule`: daily poll of PyPI for the latest `evalshift` release.
+- `workflow_dispatch`: optional `version` input to pin a specific release.
+- `repository_dispatch` with type `evalshift-cli-release` and
+  `client_payload.version`, for a push from the CLI's release workflow.
+
+Optional secret `BUMP_PR_TOKEN`: a PR opened with the default `GITHUB_TOKEN`
+does not trigger `ci.yml`. Store a fine-grained PAT with `contents` and
+`pull-requests` write on this repo under that name and the normal CI runs on
+the bump PR; without it the workflow falls back to `GITHUB_TOKEN` and the PR
+still opens, relying on the pre-validation above.
+
+### Releases
+
+Merging a change that bumps `version` in `pyproject.toml` *is* the release.
+`.github/workflows/release.yml` runs on every push to `main`: if tag
+`v<version>` does not exist yet it creates it on the merge commit, force-moves
+the floating `v0` tag to the same commit (only `v0` is ever force-pushed; exact
+tags are never moved), and publishes a GitHub Release with notes since the
+previous `v0.*` tag. Ordinary merges, where the tag already exists, stop green.
+So a merged bump PR ships the new default pin to every `@v0` consumer
+immediately. The workflow refuses a `pyproject.toml` major other than `0`:
+moving `v0` onto a 1.x commit would be wrong, and that day needs a `v1` tag and
+a change to this section.
+
+To cut a release by hand: bump `version` in `pyproject.toml` in a PR, merge it,
+done. Never push tags manually — `release.yml` owns `v<version>` and `v0`.
 
 ## License
 

@@ -63,31 +63,4 @@ jobs:
           python -m pip install "evalshift==${{ steps.pins.outputs.cli }}"
 
       - name: Assert the command surface the action depends on
-        run: |
-          set -euo pipefail
-          echo "installed: $(evalshift --version 2>&1)"
-
-          check() {
-            local subcommand="$1"
-            shift
-            local help missing=()
-            local esc
-            esc="$(printf '\033')"
-            # Capture stderr too: rich renders help to whichever stream it
-            # picks, and a silently empty capture would look like a rename.
-            help="$(evalshift "$subcommand" --help 2>&1 | sed -E "s/${esc}\[[0-9;]*m//g")"
-            for flag in "$@"; do
-              grep -q -- "$flag" <<<"$help" || missing+=("$flag")
-            done
-            if (( ${#missing[@]} > 0 )); then
-              echo "::error::'evalshift $subcommand' no longer accepts: ${missing[*]} — scripts/evalshift_action.py will break"
-              echo "--- captured 'evalshift $subcommand --help' output ---"
-              printf '%s\n' "$help"
-              echo "--- end ---"
-              return 1
-            fi
-            echo "evalshift $subcommand: $* all present"
-          }
-
-          check all --yes --config --suite
-          check push --no-create-project --config --suite
+        run: bash scripts/cli_contract.sh
