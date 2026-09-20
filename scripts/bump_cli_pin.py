@@ -12,6 +12,13 @@ Usage::
 
 A pin bump is a patch release of the action, so ``pyproject.toml``'s ``version``
 patch component is bumped alongside. Changed files are printed one per line.
+
+The action's OWN version is a second, independent version that DOCS.md and
+llms-full.txt also advertise in prose. It used to be hand-edited and drifted five
+releases behind (0.3.2 while the package was 0.5.1), because nothing bumped it and
+nothing checked it. ``ACTION_VERSION_SITES`` enumerates those headers and
+``sync_action_version`` rewrites them from ``pyproject.toml`` on every bump, so the
+two can no longer disagree.
 """
 
 from __future__ import annotations
@@ -43,6 +50,14 @@ PIN_SITES: Mapping[str, tuple[str, ...]] = {
         rf"^\| evalshift-version \| no \| {VERSION} \|",
         rf"3\.11 for {VERSION}\)",
     ),
+}
+
+# The action's own release version, as advertised in prose. ``pyproject.toml`` is the
+# source of truth; these are the places that repeat it. Each pattern stops at the
+# delimiter after the version so it can never run on into the rest of the line.
+ACTION_VERSION_SITES: Mapping[str, tuple[str, ...]] = {
+    "DOCS.md": (rf"^- \*\*Action ref:\*\* [^·]+· \*\*version:\*\* {VERSION} ·",),
+    "llms-full.txt": (rf"^Repo/action ref: [^|]+\| version: {VERSION} \|",),
 }
 
 PYPROJECT_VERSION = re.compile(
@@ -103,6 +118,33 @@ def bump_pyproject_patch(text: str) -> str:
     return text[: match.start()] + replacement + text[match.end() :]
 
 
+def current_action_version(root: Path = REPO_ROOT) -> str:
+    """Read the action's own release version from ``pyproject.toml``."""
+    text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    match = PYPROJECT_VERSION.search(text)
+    if match is None:
+        raise PinSiteError('pyproject.toml: no version = "X.Y.Z" line found')
+    return f"{match.group('major')}.{match.group('minor')}.{match.group('patch')}"
+
+
+def sync_action_version(root: Path = REPO_ROOT) -> list[Path]:
+    """Rewrite every advertised action version to match ``pyproject.toml``.
+
+    Call this AFTER ``pyproject.toml`` is written, so the headers follow the bump.
+    Returns the files actually changed.
+    """
+    released = current_action_version(root)
+    changed: list[Path] = []
+    for name, patterns in ACTION_VERSION_SITES.items():
+        path = root / name
+        before = path.read_text(encoding="utf-8")
+        after = replace_pins(before, patterns, released, label=name)
+        if after != before:
+            path.write_text(after, encoding="utf-8")
+            changed.append(path)
+    return changed
+
+
 def bump(root: Path, new_version: str) -> list[Path]:
     """Rewrite every pin site under ``root`` to ``new_version`` and return the changed files.
 
@@ -127,6 +169,14 @@ def bump(root: Path, new_version: str) -> list[Path]:
         bump_pyproject_patch(pyproject.read_text(encoding="utf-8")), encoding="utf-8"
     )
     changed.append(pyproject)
+
+    # The patch bump above just changed the action's own version, so the headers that
+    # advertise it are now stale. Rewrite them here rather than leaving a second manual
+    # step nobody performs. A site may already be in `changed` (both files carry a CLI
+    # pin too), so dedupe while preserving order.
+    for path in sync_action_version(root):
+        if path not in changed:
+            changed.append(path)
     return changed
 
 
