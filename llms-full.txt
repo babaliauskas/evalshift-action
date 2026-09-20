@@ -78,8 +78,8 @@ log until it completes.
 | config | no | evalshift.yaml | Path to config, relative to workspace root. Paths *inside* the config resolve relative to the config file's own directory (CLI behavior), so a config in a subdirectory works unchanged. |
 | suite | no | golden.jsonl | Path to golden JSONL suite, relative to workspace root. Selects the FILE only. Mutually exclusive with suite-name. |
 | suite-name | no | (empty) | `suites:` key in evalshift.yaml. Carries that suite's own evaluators block. Needs evalshift-version >= 0.14.0. Mutually exclusive with suite. |
-| evalshift-version | no | 1.0.1 | Exact CLI version installed from PyPI. Pinned for reproducibility. |
-| python-version | no | 3.12 | Python for the CLI. Must satisfy the CLI's `requires-python` (>=3.11 for 1.0.1); lowering it below that breaks install. |
+| evalshift-version | no | 1.1.0 | Exact CLI version installed from PyPI. Pinned for reproducibility. |
+| python-version | no | 3.12 | Python for the CLI. Must satisfy the CLI's `requires-python` (>=3.11 for 1.1.0); lowering it below that breaks install. |
 | fail-on | no | policy | `policy` \| `never` \| `regression` \| `any-slice-regression`. Any other value → hard error before any work. DEFAULT CHANGED: was `regression`; `policy` gates on the server's migration-policy verdict, not on the diff. |
 | require-policy | no | false | Whether `inconclusive` + `policy_source: "none"` (a run pushed with no `migration_policy`) fails the job. Default false: reported as ungated — a `::warning::` annotation on stdout and a commit status saying the gate is off — and the job still passes. Read under `fail-on: policy` only; it never overrides a verdict the policy did reach, and never the unavailable-check fallback. |
 | branch | no | "" (auto) | Candidate branch recorded on the hosted run. Auto-detected; override only for non-standard naming. |
@@ -712,7 +712,7 @@ gets an answer (`inconclusive` + `policy_source: "none"`) and its own `::warning
 Two comments on one PR → two action invocations, or the marker comment fell off page 1 of the
 comments API.
 Job is silent for minutes → output is captured and printed per command, not streamed.
-Install fails on `evalshift==1.0.1` → `python-version` below the CLI's `requires-python` (3.11).
+Install fails on `evalshift==1.1.0` → `python-version` below the CLI's `requires-python` (3.11).
 Costs higher than expected → the runner has a cold CLI cache every run; narrow the trigger with
 `on.pull_request.paths`, or shrink the suite.
 

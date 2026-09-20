@@ -36,7 +36,7 @@ inputs:
   evalshift-version:
     description: EvalShift CLI version to install.
     required: false
-    default: "1.0.1"
+    default: "1.1.0"
   python-version:
     description: Python version for the EvalShift CLI.
     required: false
