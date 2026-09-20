@@ -8,7 +8,7 @@ the candidate is not safe to ship.
 - **Action ref:** `babaliauskas/evalshift-action@v0` · **version:** 0.3.2 · **License:** MIT
 - **Kind:** composite action — installs Python + the pinned EvalShift CLI, then runs a small
   stdlib-only helper script. Nothing is compiled, nothing is containerised.
-- **Pinned CLI:** `evalshift==1.0.1` by default, overridable.
+- **Pinned CLI:** `evalshift==1.1.0` by default, overridable.
 - **What it adds on top of the CLI:** hosted push, baseline lookup, cross-branch diff, the
   governed policy verdict, one self-updating PR comment, a commit status, and an exit code.
 
@@ -240,8 +240,8 @@ means a hung job.
 | `config` | no | `evalshift.yaml` | Path to your config, relative to the repository root. Paths *inside* the config (prompt files, tools) resolve relative to the config file's own directory, so a config in a subdirectory works. |
 | `suite` | no | `golden.jsonl` | Path to the golden JSONL suite, relative to the repository root. Selects a *file* and nothing else — see [Selecting a suite](#selecting-a-suite-name-vs-path). Mutually exclusive with `suite-name`. |
 | `suite-name` | no | — | Name of a suite wired under `suites:` in `evalshift.yaml`. Prefer this over `suite`. Needs `evalshift-version` >= `0.14.0`. See [Selecting a suite](#selecting-a-suite-name-vs-path). |
-| `evalshift-version` | no | `1.0.1` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
-| `python-version` | no | `3.12` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.11 for 1.0.1). |
+| `evalshift-version` | no | `1.1.0` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
+| `python-version` | no | `3.12` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.11 for 1.1.0). |
 | `fail-on` | no | `policy` | Gating mode. See [below](#gating-the-fail-on-modes). |
 | `require-policy` | no | `false` | Whether a run pushed without a `migration_policy` fails the job. By default such a run merges, reported as ungated — a `::warning::` annotation and a commit status saying the gate is off. Read only under `fail-on: policy`. See [When no policy was pushed](#when-no-policy-was-pushed). |
 | `branch` | no | auto | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. |
@@ -928,9 +928,9 @@ the comments API on a long thread.
 It doesn't — output is buffered per command and printed when each finishes. A slow suite is
 silent while it runs.
 
-### `pip install evalshift==1.0.1` fails
+### `pip install evalshift==1.1.0` fails
 
-`python-version` is below the CLI's minimum. EvalShift 1.0.1 needs Python 3.11+.
+`python-version` is below the CLI's minimum. EvalShift 1.1.0 needs Python 3.11+.
 
 ### Costs are higher than expected
 
