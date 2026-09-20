@@ -1,7 +1,7 @@
 # evalshift-action (GitHub Action) — complete reference for AI tools
 
 Canonical hosted copy: https://www.evalshift.dev/ci-llms-full.txt
-Repo/action ref: babaliauskas/evalshift-action | version: 0.3.2 | license: MIT
+Repo/action ref: babaliauskas/evalshift-action | version: 0.5.1 | license: MIT
 Kind: composite GitHub Action (not JavaScript, not Docker)
 Marketplace name: "EvalShift" | branding: bar-chart-2 / purple
 Runtime helper: scripts/evalshift_action.py (stdlib only, no third-party deps)

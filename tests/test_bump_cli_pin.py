@@ -108,3 +108,28 @@ def test_main_prints_changed_files(
 
 def test_main_usage_error() -> None:
     assert bump_script.main([]) == 2
+
+
+def test_bump_carries_the_action_version_into_the_doc_headers(repo_copy: Path) -> None:
+    """The patch bump must reach the prose headers, not just pyproject.
+
+    This is the regression that let DOCS.md and llms-full.txt sit at 0.3.2 while the
+    package shipped 0.5.1: the version moved and nothing rewrote the sentences quoting it.
+    """
+    before = bump_script.current_action_version(repo_copy)
+
+    bump_script.bump(repo_copy, "9.8.7")
+
+    after = bump_script.current_action_version(repo_copy)
+    assert after != before, "the bump should have moved the action's own patch version"
+    for name, patterns in bump_script.ACTION_VERSION_SITES.items():
+        text = (repo_copy / name).read_text(encoding="utf-8")
+        found = bump_script.find_pins(text, patterns, label=name)
+        assert set(found) == {after}, f"{name} advertises {sorted(set(found))}, expected {after}"
+
+
+def test_sync_action_version_is_idempotent_and_touches_nothing_else(repo_copy: Path) -> None:
+    docs_before = (repo_copy / "DOCS.md").read_text(encoding="utf-8")
+
+    assert bump_script.sync_action_version(repo_copy) == []
+    assert (repo_copy / "DOCS.md").read_text(encoding="utf-8") == docs_before

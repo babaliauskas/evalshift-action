@@ -1,8 +1,11 @@
-"""Every mention of the pinned EvalShift CLI version must equal the action.yml default.
+"""Every version the docs quote must equal its source of truth.
 
-The regex list lives in ``scripts/bump_cli_pin.py`` (``PIN_SITES``) so the bump script
-and this test can never disagree about where the pin is written down. Adding a doc site
-is one line there.
+Two independent versions live in this repo and both are written down in prose:
+the pinned EvalShift CLI (``action.yml``'s ``evalshift-version`` default) and the
+action's own release version (``pyproject.toml``). The regex lists live in
+``scripts/bump_cli_pin.py`` (``PIN_SITES`` and ``ACTION_VERSION_SITES``) so the bump
+script and this test can never disagree about where a version is written down.
+Adding a doc site is one line there.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from _manifest import REPO_ROOT, manifest_input_default
-from bump_cli_pin import PIN_SITES, find_pins
+from bump_cli_pin import ACTION_VERSION_SITES, PIN_SITES, current_action_version, find_pins
 
 DOC_SITES = {name: patterns for name, patterns in PIN_SITES.items() if name != "action.yml"}
 
@@ -39,3 +42,23 @@ def test_every_documented_pin_matches_action_manifest(name: str) -> None:
     stale = [found for found in find_pins(text, DOC_SITES[name], label=name) if found != pinned]
 
     assert stale == [], f"{name} still mentions {sorted(set(stale))}; action.yml pins {pinned}"
+
+
+def test_action_version_sites_cover_the_documented_files() -> None:
+    assert set(ACTION_VERSION_SITES) == {"DOCS.md", "llms-full.txt"}
+
+
+@pytest.mark.parametrize("name", sorted(ACTION_VERSION_SITES))
+def test_every_documented_action_version_matches_pyproject(name: str) -> None:
+    released = current_action_version(REPO_ROOT)
+    text = (REPO_ROOT / name).read_text(encoding="utf-8")
+
+    stale = [
+        found
+        for found in find_pins(text, ACTION_VERSION_SITES[name], label=name)
+        if found != released
+    ]
+
+    assert stale == [], (
+        f"{name} still advertises version {sorted(set(stale))}; pyproject.toml says {released}"
+    )
