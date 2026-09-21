@@ -934,7 +934,7 @@ CI suite, or swap LLM-judge evaluators for structural ones in a CI-specific conf
 
 ## Versioning and stability
 
-Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.3.0` for a fully
+Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.5.1` for a fully
 reproducible workflow. The `evalshift-version` input pins the CLI separately — pin both if you
 want a workflow that behaves identically six months from now.
 

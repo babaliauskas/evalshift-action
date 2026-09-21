@@ -714,7 +714,7 @@ Costs higher than expected → the runner has a cold CLI cache every run; narrow
 
 ## Versioning
 
-`@v0` tracks the latest v0.x. `@v0.3.0` pins exactly. `evalshift-version` pins the CLI
+`@v0` tracks the latest v0.x. `@v0.5.1` pins exactly. `evalshift-version` pins the CLI
 independently of the action tag — pin both for a fully reproducible workflow.
 The `evalshift-version` default in `action.yml` is the single source of truth for the CLI pin;
 `tests/test_pin_consistency.py` fails on any stale mention elsewhere. The default is bumped by
