@@ -45,14 +45,19 @@ def test_bump_rewrites_every_site_and_only_those_files(repo_copy: Path) -> None:
 def test_bump_only_touches_the_version_group(repo_copy: Path) -> None:
     before = (repo_copy / "README.md").read_text(encoding="utf-8")
     old = bump_script.current_pin(repo_copy)
+    old_action_version = bump_script.current_action_version(repo_copy)
 
     bump_script.bump(repo_copy, "9.8.7")
 
     after = (repo_copy / "README.md").read_text(encoding="utf-8")
-    # Only one line differs, and it differs only by the pin literal.
+    new_action_version = bump_script.current_action_version(repo_copy)
+    # Two lines differ: the CLI pin table row, and the action's own version in the
+    # `@vX.Y.Z` example tag -- the CLI bump also patch-bumps pyproject.toml, and
+    # EXAMPLE_TAG_SITES follows that bump the same way ACTION_VERSION_SITES does.
     diff = [(a, b) for a, b in zip(before.splitlines(), after.splitlines(), strict=True) if a != b]
-    assert len(diff) == 1
+    assert len(diff) == 2
     assert diff[0][0].replace(old, "9.8.7") == diff[0][1]
+    assert diff[1][0].replace(old_action_version, new_action_version) == diff[1][1]
 
 
 def test_bump_increments_pyproject_patch(repo_copy: Path) -> None:

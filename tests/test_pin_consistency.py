@@ -18,7 +18,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from _manifest import REPO_ROOT, manifest_input_default
-from bump_cli_pin import ACTION_VERSION_SITES, PIN_SITES, current_action_version, find_pins
+from bump_cli_pin import (
+    ACTION_VERSION_SITES,
+    EXAMPLE_TAG_SITES,
+    PIN_SITES,
+    current_action_version,
+    find_pins,
+)
 
 DOC_SITES = {name: patterns for name, patterns in PIN_SITES.items() if name != "action.yml"}
 
@@ -61,4 +67,28 @@ def test_every_documented_action_version_matches_pyproject(name: str) -> None:
 
     assert stale == [], (
         f"{name} still advertises version {sorted(set(stale))}; pyproject.toml says {released}"
+    )
+
+
+def test_example_tag_sites_cover_the_documented_files() -> None:
+    assert set(EXAMPLE_TAG_SITES) == {"README.md", "DOCS.md", "llms-full.txt"}
+
+
+@pytest.mark.parametrize("name", sorted(EXAMPLE_TAG_SITES))
+def test_every_example_tag_matches_pyproject(name: str) -> None:
+    """The "pin to an exact tag" example must name a tag that exists and is current.
+
+    It sat at v0.3.0 across five releases -- v0.3.x through v0.5.1 -- because it
+    was hand-written prose that no bump touched. Advice to pin is advice to pin
+    to *something*; two minors behind, the example reads as the recommendation.
+    """
+    released = current_action_version(REPO_ROOT)
+    text = (REPO_ROOT / name).read_text(encoding="utf-8")
+
+    stale = [
+        found for found in find_pins(text, EXAMPLE_TAG_SITES[name], label=name) if found != released
+    ]
+
+    assert stale == [], (
+        f"{name}'s example tag is @v{sorted(set(stale))}; pyproject.toml says {released}"
     )

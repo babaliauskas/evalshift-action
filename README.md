@@ -108,17 +108,16 @@ scopes, and the scope picker on that page speaks the same permission keys:
 
 Set the service account's role to `member`; a `viewer` cannot upload a run.
 
-Two things a correctly-scoped key deliberately cannot do:
+One thing a correctly-scoped key deliberately cannot do:
 
 - **Auto-create the hosted project.** `project:create` is an owner permission and
   a service account is never an owner. Create the project once in the web app and
   set `create-project: false`, so a wrong project slug fails as a missing project
   rather than looking like a credential problem.
-- **Rewrite the project's gating thresholds.** `evalshift push` sends the
-  `thresholds:` block from your `evalshift.yaml` whenever one is present, and
-  rewriting a project's gating policy needs `policy:configure` — also owner-only.
-  Keep thresholds canonical in the web app and out of the config the CI job runs,
-  or the push fails with `Project owner role required`.
+
+The gate itself needs no extra scope. Your `migration_policy` travels inside the
+run bundle that `run:create` already uploads, so a member-role key both pushes
+the policy and gates on it — see [`fail-on` modes](#fail-on-modes).
 
 When the key is missing a permission, the action prints the exact permission key
 it was denied and how to fix it before exiting non-zero — you never have to guess
@@ -330,7 +329,7 @@ skips.
 
 ## Versioning
 
-Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.3.0` for
+Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.5.1` for
 a fully reproducible workflow.
 
 ### How the pin is maintained

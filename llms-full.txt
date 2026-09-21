@@ -492,10 +492,8 @@ vocabulary; scopes are an intersection, so naming a key the role lacks grants no
 Out of reach for a scoped key, by design:
 - Auto-creating the hosted project (`project:create` is owner-only). Create the project in the
   web app and set `create-project: false`.
-- Rewriting gating thresholds (`policy:configure` is owner-only). `evalshift push` sends the
-  `thresholds:` block from `evalshift.yaml` whenever one is present, so keep thresholds
-  canonical in the web app and out of the CI config, or push fails
-  `Project owner role required`.
+Gating needs no further scope: `migration_policy` rides in the bundle `run:create` uploads, so a
+member-role key both pushes the policy and gates on it.
 
 Rotation — overlapping keys, never an in-place secret swap:
 1. Rotate in the web app (the old key keeps working for a 24-hour grace window).
@@ -690,8 +688,6 @@ the exact permission key and points at minting a scoped service-account key. Exi
 non-zero.
 `cannot auto-create project: this token must have owner access to the org` → a service-account
 key cannot create projects; pre-create it and set `create-project: false`.
-`Project owner role required` → push tried to rewrite gating thresholds (`policy:configure`,
-owner-only); drop `thresholds:` from the CI config.
 Job failed before the CLI ran, with a plan message and an upgrade link → CI preflight got a
 402; the org's plan does not cover this run (usually the monthly run quota or the parallelism
 cap; private-repo CI is included on every plan). Nothing ran, nothing was charged.
@@ -718,7 +714,7 @@ Costs higher than expected → the runner has a cold CLI cache every run; narrow
 
 ## Versioning
 
-`@v0` tracks the latest v0.x. `@v0.3.0` pins exactly. `evalshift-version` pins the CLI
+`@v0` tracks the latest v0.x. `@v0.5.1` pins exactly. `evalshift-version` pins the CLI
 independently of the action tag — pin both for a fully reproducible workflow.
 The `evalshift-version` default in `action.yml` is the single source of truth for the CLI pin;
 `tests/test_pin_consistency.py` fails on any stale mention elsewhere. The default is bumped by

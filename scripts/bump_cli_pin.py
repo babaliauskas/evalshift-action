@@ -16,9 +16,10 @@ patch component is bumped alongside. Changed files are printed one per line.
 The action's OWN version is a second, independent version that DOCS.md and
 llms-full.txt also advertise in prose. It used to be hand-edited and drifted five
 releases behind (0.3.2 while the package was 0.5.1), because nothing bumped it and
-nothing checked it. ``ACTION_VERSION_SITES`` enumerates those headers and
-``sync_action_version`` rewrites them from ``pyproject.toml`` on every bump, so the
-two can no longer disagree.
+nothing checked it. ``ACTION_VERSION_SITES`` enumerates those headers,
+``EXAMPLE_TAG_SITES`` the ``@vX.Y.Z`` example tag that drifted the same way, and
+``sync_action_version`` rewrites both from ``pyproject.toml`` on every bump, so none
+of them can disagree.
 """
 
 from __future__ import annotations
@@ -58,6 +59,16 @@ PIN_SITES: Mapping[str, tuple[str, ...]] = {
 ACTION_VERSION_SITES: Mapping[str, tuple[str, ...]] = {
     "DOCS.md": (rf"^- \*\*Action ref:\*\* [^·]+· \*\*version:\*\* {VERSION} ·",),
     "llms-full.txt": (rf"^Repo/action ref: [^|]+\| version: {VERSION} \|",),
+}
+
+# The "pin to an exact tag" example in the versioning prose. Same source of truth as
+# ACTION_VERSION_SITES -- pyproject.toml -- in a different shape: a `@vX.Y.Z` git tag
+# rather than a bare version. It sat at `@v0.3.0` from v0.3.x through v0.5.1 because
+# no bump touched it and no test read it. Advice to pin has to name a tag that exists.
+EXAMPLE_TAG_SITES: Mapping[str, tuple[str, ...]] = {
+    "README.md": (rf"exact tag such as `@v{VERSION}`",),
+    "DOCS.md": (rf"exact tag such as `@v{VERSION}`",),
+    "llms-full.txt": (rf"^`@v0` tracks the latest v0\.x\. `@v{VERSION}` pins exactly\.",),
 }
 
 PYPROJECT_VERSION = re.compile(
@@ -130,18 +141,24 @@ def current_action_version(root: Path = REPO_ROOT) -> str:
 def sync_action_version(root: Path = REPO_ROOT) -> list[Path]:
     """Rewrite every advertised action version to match ``pyproject.toml``.
 
-    Call this AFTER ``pyproject.toml`` is written, so the headers follow the bump.
-    Returns the files actually changed.
+    Covers both shapes the version is written in: the prose version headers
+    (``ACTION_VERSION_SITES``) and the ``@vX.Y.Z`` example tag
+    (``EXAMPLE_TAG_SITES``). Call this AFTER ``pyproject.toml`` is written, so
+    both follow the bump. Returns the files actually changed, in order, deduped.
     """
     released = current_action_version(root)
     changed: list[Path] = []
-    for name, patterns in ACTION_VERSION_SITES.items():
-        path = root / name
-        before = path.read_text(encoding="utf-8")
-        after = replace_pins(before, patterns, released, label=name)
-        if after != before:
+    for table in (ACTION_VERSION_SITES, EXAMPLE_TAG_SITES):
+        for name, patterns in table.items():
+            path = root / name
+            before = path.read_text(encoding="utf-8")
+            after = replace_pins(before, patterns, released, label=name)
+            if after == before:
+                continue
             path.write_text(after, encoding="utf-8")
-            changed.append(path)
+            # Both tables name the same three files, so a path can already be here.
+            if path not in changed:
+                changed.append(path)
     return changed
 
 
