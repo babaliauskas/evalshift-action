@@ -174,17 +174,16 @@ exactly two:
 Give the service account the `member` role. A `viewer` holds `run:read` but not `run:create`,
 so it can look but never upload.
 
-Two consequences of a correctly-scoped key, both by design:
+One consequence of a correctly-scoped key, by design:
 
 - **It cannot auto-create the hosted project.** `project:create` is an owner permission, and a
   service account is never an owner. Create the project once in the web app, then set
   `create-project: false` so a wrong project slug reads as a missing project rather than as a
   credential problem.
-- **It cannot rewrite the project's gating thresholds.** `evalshift push` sends the
-  `thresholds:` block from your `evalshift.yaml` whenever one is present, and rewriting a
-  project's gating policy needs the owner-only `policy:configure`. Keep thresholds canonical in
-  the web app and out of the config the CI job runs, or the push fails with
-  `Project owner role required`.
+
+The gate needs no scope beyond these two. The `migration_policy` block rides inside the run
+bundle `run:create` already uploads, so a member-role key both pushes the policy and gates on
+it.
 
 A denial is self-diagnosing: the action prints the exact permission key the hosted API refused,
 plus how to mint a key that holds it, before exiting non-zero.
@@ -866,12 +865,6 @@ action always needs are `run:create` and `run:read`.
 
 A service-account key cannot create projects; `project:create` is owner-only. Create the project
 in the web app and set `create-project: false`.
-
-### `Project owner role required`
-
-`evalshift push` tried to rewrite the project's gating thresholds, which needs the owner-only
-`policy:configure`. Remove the `thresholds:` block from the config the CI job runs and manage
-thresholds in the web app.
 
 ### `warning: could not upsert PR comment: HTTP 403`
 
