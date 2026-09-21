@@ -383,6 +383,13 @@ a change to this section.
 To cut a release by hand: bump `version` in `pyproject.toml` in a PR, merge it,
 done. Never push tags manually — `release.yml` owns `v<version>` and `v0`.
 
+## Further reading
+
+- [LLM regression testing in CI: gate pull requests on eval diffs](https://www.evalshift.dev/blog/llm-regression-testing-in-ci)
+- [Prompt edits deserve the same gate as a model swap](https://www.evalshift.dev/blog/prompt-regression-testing)
+- [This one passed: 71% cheaper, and the agent still does the same thing](https://www.evalshift.dev/blog/what-a-passing-migration-proves) — a real PASS report, and what PASS does and does not claim.
+- [GitHub Action docs](https://www.evalshift.dev/docs/action)
+
 ## License
 
 MIT — see [LICENSE](LICENSE). The EvalShift CLI this action installs is licensed
