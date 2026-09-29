@@ -147,6 +147,7 @@ CLI picks it up.
 | Anthropic | `ANTHROPIC_API_KEY`                   |
 | OpenAI    | `OPENAI_API_KEY`                      |
 | Google    | `GEMINI_API_KEY` or `GOOGLE_API_KEY`  |
+| DeepSeek  | `DEEPSEEK_API_KEY`                    |
 
 Which key you need follows from `defaults.source_model` and
 `defaults.target_model` in your `evalshift.yaml`. Comparing models across two
