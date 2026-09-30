@@ -950,6 +950,32 @@ def test_fetch_policy_check_reports_a_failure_instead_of_swallowing_it(
     assert reason in capsys.readouterr().err
 
 
+def test_fetch_policy_check_names_a_missing_policy_read_in_its_fallback(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A key without `policy:read` degrades the default gate; the warning must say which scope."""
+
+    def forbidden_request(*args: Any, **kwargs: Any) -> Any:
+        raise HTTPError(
+            "https://api.evalshift.test/runs/r/policy-check",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(_error_envelope("forbidden", "Permission denied: policy:read")),
+        )
+
+    client = action.HostedClient(
+        "https://api.evalshift.test", "es_secret", request=forbidden_request
+    )
+
+    payload, reason = action.fetch_policy_check(client, SERVER_RUN_ID)
+
+    assert payload is None
+    assert "HTTP 403" in reason
+    assert "'policy:read'" in reason
+    assert "falling back to fail-on: regression" in capsys.readouterr().err
+
+
 def test_fetch_policy_check_treats_a_decisionless_response_as_unavailable(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
