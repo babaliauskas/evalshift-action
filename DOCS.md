@@ -640,8 +640,8 @@ Every word of it comes from the server. The action never decides what a plan cov
 and a client that guesses at entitlements is a client that tells people the wrong thing after
 the next pricing change.
 
-**Answers the push would repeat stop the job too**, with the fix in the error and the same
-`conclusion: failure` outputs as a `402`:
+**Answers the push would repeat stop the job too**, reported like a `402`: an `::error::`
+annotation carrying the fix, a step summary, and the same `conclusion: failure` outputs:
 
 | Answer | Why the job stops |
 | ------ | ----------------- |

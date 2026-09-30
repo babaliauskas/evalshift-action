@@ -104,7 +104,7 @@ scopes, and the scope picker on that page speaks the same permission keys:
 | Scope         | What needs it |
 | ------------- | ------------- |
 | `run:create`  | `evalshift push` — creating the hosted run and finalizing the upload — and the [plan preflight](#plan-limits). |
-| `run:read`    | The baseline lookup and the diff the PR comment shows. |
+| `run:read`    | The baseline lookup and the diff the PR comment shows (and the diff-based `fail-on` modes gate on). |
 | `policy:read` | The policy verdict the default `fail-on: policy` gates on. |
 
 Set the service account's role to `member`; a `viewer` cannot upload a run.
@@ -311,7 +311,8 @@ seats also stop it. Private-repo CI is included on every plan, the free one incl
 
 The job also stops before the suite when the push would fail anyway: a token the server
 rejects (`401`), a key without `run:create` (`403`), or a project that doesn't exist while
-`create-project: false` (`404`). With `create-project: true` a missing project is a notice
+`create-project: false` (`404`). Each is reported like a `402` — an `::error::` annotation
+carrying the fix, and a step summary. With `create-project: true` a missing project is a notice
 instead, because the first push creates it.
 
 Anything else — EvalShift being down, a server too old to have the endpoint — is treated as an

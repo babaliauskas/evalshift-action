@@ -195,11 +195,11 @@ Outcomes (`run_preflight(hosted, *, project_ref, repo_private, create_project)`)
 - `402` → `PreflightDenied(message, details)`, job fails immediately with exit 1, `evalshift`
   never runs. `details` is the server's envelope: `feature`, `tier`, `limit`, `used`,
   `status`, `resets_at`, `upgrade_url`. The action renders it and decides nothing itself.
-- `401` → STOP: `ActionError` `hosted EvalShift at <host> rejected the token (HTTP 401): ...`
-  plus key advice. Exit 1, `evalshift` never runs.
-- `403` → STOP: `ActionError` `hosted EvalShift refused the plan preflight (HTTP 403): ...`
-  plus `The EvalShift token is missing the 'run:create' permission. ...`. Exit 1.
-- `404` + `create-project: false` → STOP: `ActionError` `hosted EvalShift has no project
+- `401` → STOP: `hosted EvalShift at <host> rejected the token (HTTP 401): ...` plus key
+  advice. Exit 1, `evalshift` never runs.
+- `403` → STOP: `hosted EvalShift refused the plan preflight (HTTP 403): ...` plus
+  `The EvalShift token is missing the 'run:create' permission. ...`. Exit 1.
+- `404` + `create-project: false` → STOP: `hosted EvalShift has no project
   '<org>/<project>' this token can reach (HTTP 404), and create-project: false forbids the
   push to create it. ...`. Exit 1. (404 is existence-hiding: unknown org, unknown project,
   non-member, or a key pinned to another project all look the same.)
@@ -210,13 +210,18 @@ Outcomes (`run_preflight(hosted, *, project_ref, repo_private, create_project)`)
   EvalShift at <host> predates POST /runs/preflight (HTTP 405); ...`, run proceeds. NO
   fallback to any older preflight flow.
 - Anything else (5xx, 422, other 4xx, timeout, DNS/URLError, malformed body) → `warning: plan
-  preflight skipped: <exc>` on stderr, run proceeds. Fail-closed on billing and on answers
-  the push would repeat; fail-open on infrastructure.
-Outputs on every STOP are the same as on a 402 denial (below).
+  preflight skipped: <exc>` on stderr, run proceeds. Also `http.client.HTTPException`
+  (BadStatusLine, IncompleteRead). Fail-closed on billing and on answers the push would
+  repeat; fail-open on infrastructure.
+Every STOP is reported like a 402 denial: stdout `::error title=EvalShift::<message>` (one
+line, the fix after an escaped `%0A`), and a `## EvalShift did not run` block with the message
+appended to `$GITHUB_STEP_SUMMARY`. No PR comment. Outputs are the same as on a 402 denial
+(below). Nothing is printed to stderr for a STOP.
 
 Denial rendering, all three from the same markdown body (`build_preflight_body`):
 - stdout: `::error title=EvalShift::<message>%0AUpgrade: <upgrade_url>` (workflow commands are
-  single-line; `%`/`\r`/`\n` escape to `%25`/`%0D`/`%0A`).
+  single-line; in the message `%`/`\r`/`\n` escape to `%25`/`%0D`/`%0A`, `%` first; the
+  `title=` property additionally escapes `:`/`,` to `%3A`/`%2C`).
 - `$GITHUB_STEP_SUMMARY`: the body, appended.
 - PR comment: the same body via `upsert_pr_comment`, carrying `COMMENT_MARKER`, so it replaces
   the regular EvalShift comment rather than stacking. Requires `github-token` + `comment: true`.
