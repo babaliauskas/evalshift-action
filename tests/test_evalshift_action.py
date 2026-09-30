@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -1691,8 +1692,22 @@ def test_run_preflight_warns_and_continues_on_a_server_that_predates_the_route(
         URLError("connection refused"),
         TimeoutError("timed out"),
         ValueError("Expecting value: line 1 column 1 (char 0)"),
+        # Neither OSError nor ValueError: a garbled status line, a body cut short.
+        http.client.BadStatusLine("garbage"),
+        http.client.IncompleteRead(b"{", 10),
     ],
-    ids=["500", "502", "503", "422", "429", "url-error", "timeout", "malformed-body"],
+    ids=[
+        "500",
+        "502",
+        "503",
+        "422",
+        "429",
+        "url-error",
+        "timeout",
+        "malformed-body",
+        "bad-status-line",
+        "incomplete-read",
+    ],
 )
 def test_run_preflight_never_blocks_on_an_infrastructure_failure(
     failure: Exception,
@@ -1789,6 +1804,18 @@ def test_error_annotation_is_a_single_line() -> None:
     assert annotation.startswith("::error title=EvalShift::")
     assert "\n" not in annotation
     assert "%0A" in annotation
+
+
+def test_workflow_command_escapes_percent_before_the_line_breaks() -> None:
+    """`%` first, or the `%` of an escaped `%0D` would itself be escaped to `%250D`."""
+    assert action.workflow_command("notice", "T", "50%\r\nx") == "::notice title=T::50%25%0D%0Ax"
+
+
+def test_workflow_command_escapes_the_title_property() -> None:
+    """A property value also ends at `:` or `,`, so those escape too -- in the title only."""
+    command = action.workflow_command("notice", "a:b,c%d\r\ne", "k:v,w")
+
+    assert command == "::notice title=a%3Ab%2Cc%25d%0D%0Ae::k:v,w"
 
 
 def _preflight_main(
@@ -1927,19 +1954,35 @@ def test_a_preflight_the_token_cannot_pass_stops_the_job_before_the_suite(
 ) -> None:
     """The push would fail the same way -- after every model call in the suite was paid for."""
     outputs = tmp_path / "outputs.txt"
+    summary = tmp_path / "summary.md"
 
     exit_code, requests, ran = _preflight_main(
         monkeypatch,
         tmp_path,
         preflight=_http_error(code, body),
-        env={"GITHUB_OUTPUT": str(outputs)},
+        env={"GITHUB_OUTPUT": str(outputs), "GITHUB_STEP_SUMMARY": str(summary)},
     )
 
     assert exit_code == 1
     assert ran == []
     assert len(requests) == 1
-    assert expected in capsys.readouterr().err
+    annotation = _single_error_annotation(capsys.readouterr())
+    assert expected in annotation
+    # The fix is on the line after the status: kept, escaped, inside the one annotation.
+    assert "%0A" in annotation
+    assert expected in summary.read_text("utf-8")
     assert _outputs(outputs) == STOPPED_OUTPUTS
+
+
+def _single_error_annotation(captured: pytest.CaptureResult[str]) -> str:
+    """The one ``::error::`` line a stopped job prints, asserting it was printed only once."""
+    annotations = [
+        line for line in captured.out.splitlines() if line.startswith("::error title=EvalShift::")
+    ]
+    assert len(annotations) == 1, captured.out
+    # Printed as an annotation, not repeated as a plain `error:` line by the outer handler.
+    assert "error:" not in captured.err
+    return annotations[0]
 
 
 def test_a_missing_project_stops_the_job_when_create_project_is_off(
@@ -1949,16 +1992,23 @@ def test_a_missing_project_stops_the_job_when_create_project_is_off(
 ) -> None:
     outputs = tmp_path / "outputs.txt"
 
+    summary = tmp_path / "summary.md"
+
     exit_code, _, ran = _preflight_main(
         monkeypatch,
         tmp_path,
         preflight=_http_error(404),
-        env={"INPUT_CREATE_PROJECT": "false", "GITHUB_OUTPUT": str(outputs)},
+        env={
+            "INPUT_CREATE_PROJECT": "false",
+            "GITHUB_OUTPUT": str(outputs),
+            "GITHUB_STEP_SUMMARY": str(summary),
+        },
     )
 
     assert exit_code == 1
     assert ran == []
-    assert "acme/checkout" in capsys.readouterr().err
+    assert "acme/checkout" in _single_error_annotation(capsys.readouterr())
+    assert "## EvalShift did not run" in summary.read_text("utf-8")
     assert _outputs(outputs) == STOPPED_OUTPUTS
 
 

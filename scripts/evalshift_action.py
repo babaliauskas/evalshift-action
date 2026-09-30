@@ -8,6 +8,7 @@ action outputs, and updates GitHub PR affordances.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -141,6 +142,11 @@ KEY_ADVICE = (
     "(EvalShift web app -> Settings -> API tokens -> Service accounts), store it as an "
     "encrypted repository or environment secret, and point the action's 'token' input at it. "
     "A personal token is not a CI credential -- it dies with the person who created it."
+)
+# `POST /runs/preflight` requires exactly one permission, so a 403 there means this one even
+# when the body does not say so (a proxy's 403, say).
+PREFLIGHT_PERMISSION_HINT = (
+    f"The EvalShift token is missing the 'run:create' permission. {KEY_ADVICE}"
 )
 
 RequestFn = Callable[[str, str, dict[str, str], bytes | None], Any]
@@ -751,8 +757,9 @@ def run_preflight(
         return denial
     except HTTPError as exc:
         _preflight_http_error(exc, project_slug=project_slug, create_project=create_project)
-    # OSError covers URLError and a socket timeout; ValueError a malformed response body.
-    except (OSError, ValueError) as exc:
+    # OSError covers URLError and a socket timeout; ValueError a malformed response body;
+    # http.client.HTTPException a garbled status line or a body cut short (IncompleteRead).
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         print(f"warning: plan preflight skipped: {exc}", file=sys.stderr)
     return None
 
@@ -772,9 +779,7 @@ def _preflight_http_error(exc: HTTPError, *, project_slug: str, create_project: 
     if exc.code == 403:
         detail = error_body_message(exc)
         suffix = f": {detail}" if detail else ""
-        hint = missing_permission_hint(detail) or missing_permission_hint(
-            "Permission denied: run:create"
-        )
+        hint = missing_permission_hint(detail) or PREFLIGHT_PERMISSION_HINT
         raise ActionError(
             f"hosted EvalShift refused the plan preflight (HTTP 403){suffix}\n{hint}"
         ) from exc
@@ -838,10 +843,25 @@ def build_preflight_body(denial: PreflightDenied) -> str:
     return "\n".join(lines)
 
 
+def _escape_data(value: str) -> str:
+    """A workflow command's message: one line, so line breaks escape. ``%`` goes first."""
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _escape_property(value: str) -> str:
+    """A workflow command's property value, which also ends at ``:`` (the message) or ``,``."""
+    return _escape_data(value).replace(":", "%3A").replace(",", "%2C")
+
+
 def workflow_command(kind: str, title: str, message: str) -> str:
-    """A GitHub ``::<kind>::`` command. Workflow commands are one line, so newlines escape."""
-    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    return f"::{kind} title={title}::{escaped}"
+    """A GitHub ``::<kind> title=...::`` command, escaped the way the runner unescapes it."""
+    return f"::{kind} title={_escape_property(title)}::{_escape_data(message)}"
+
+
+def build_preflight_stop_body(message: str) -> str:
+    """A preflight stop (401, 403, 404) as markdown for the step summary."""
+    # One paragraph per line: markdown would run adjacent lines together.
+    return "\n\n".join(["## EvalShift did not run", *message.splitlines()])
 
 
 def error_annotation(message: str) -> str:
@@ -1381,11 +1401,15 @@ def main() -> int:
                 repo_private=config.repo_private,
                 create_project=config.create_project,
             )
-        except ActionError:
-            # Stopped before the suite: the same outputs as a denial, so a workflow reading
-            # `conclusion` sees a failure rather than an empty string.
+        except ActionError as exc:
+            # Stopped before the suite, reported the way a denial is: an annotation, a step
+            # summary, and the same outputs, so a workflow reading `conclusion` sees a failure
+            # rather than an empty string. Returned, not re-raised: the outer handler would
+            # print the same text a second time.
+            print(error_annotation(str(exc)))
+            write_step_summary(build_preflight_stop_body(str(exc)))
             write_outputs(STOPPED_OUTPUTS)
-            raise
+            return 1
         if denial is not None:
             report_preflight_denial(denial, config, context)
             write_outputs(STOPPED_OUTPUTS)
