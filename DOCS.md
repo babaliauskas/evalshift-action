@@ -120,14 +120,19 @@ The CLI's `evalshift init --ci` scaffolds a near-identical workflow for you.
 
 ### What you'll see on the first PR
 
-The check goes green and the comment says no compatible baseline was found — expected, since
-there's no trunk run yet to diff against. It's also green for a second reason at this stage: you
-likely haven't added a `migration_policy` to `evalshift.yaml` yet, so hosted EvalShift reports
-the run as **ungated** rather than evaluating a policy (see
-[When no policy was pushed](#when-no-policy-was-pushed)). Once you add a policy, its verdict on
-that same first PR is decided independently of the baseline — the "no baseline" comment and the
-policy gate are two separate things. Merge it, let the `push` trigger record a baseline on
-`main`, and the next PR gets a real diff table alongside the policy verdict.
+The comment says no compatible baseline run was found — expected, since there's no trunk run yet
+to diff against; that's a `regression`-mode diff observation, not a misconfiguration. It says
+nothing about whether the job passes.
+
+Under the default `fail-on: policy`, this same first PR is gated by the run's own policy
+verdict, independent of the baseline: `evalshift init` always writes a `migration_policy` block
+into `evalshift.yaml` (every migration profile has one), so a project scaffolded the way these
+docs recommend carries a policy from its very first run, and hosted EvalShift evaluates it — the
+job passes only if that verdict does. A run is reported as **ungated** only when the config
+carries no `migration_policy` at all — see
+[When no policy was pushed](#when-no-policy-was-pushed) — which isn't the case here unless you
+deleted the block `init` wrote. Merge the first PR, let the `push` trigger record a baseline on
+`main`, and the next PR additionally gets a real diff table alongside the policy verdict.
 
 ---
 

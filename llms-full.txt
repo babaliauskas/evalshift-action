@@ -542,9 +542,11 @@ the env var covers any other prompt a CLI release adds.
   `regression_count=0`, `diff_url=""`, comment says so explicitly. That passes the diff-based
   `fail-on` modes (`regression`, `any-slice-regression`); it does not by itself pass `fail-on:
   policy` (the default), which asks the server for a policy verdict on the run regardless of
-  baseline — a first PR against a repo with no history goes green under `fail-on: policy` only
-  if the policy verdict itself passes (or, commonly at that stage, no `migration_policy` was
-  pushed yet, which reports as ungated rather than a policy pass).
+  baseline — a first PR against a repo with no history goes green under `fail-on: policy` only if
+  the policy verdict itself passes. `evalshift init` always writes a `migration_policy` block
+  (every migration profile has one), so an `init`-scaffolded project carries a policy from its
+  first run; a run reports as ungated (ignoring the policy gate rather than passing it) only when
+  `evalshift.yaml` carries no `migration_policy` at all.
 - The action never uploads report artifacts to GitHub. `report.html` and all run artifacts stay
   in the workspace at `.evalshift/runs/<run-id>/`; add your own `actions/upload-artifact` step
   if you want them retained.
