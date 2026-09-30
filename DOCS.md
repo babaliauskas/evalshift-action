@@ -619,11 +619,13 @@ Every word of it comes from the server. The action never decides what a plan cov
 and a client that guesses at entitlements is a client that tells people the wrong thing after
 the next pricing change.
 
-**Everything else is fail-open.** A 5xx, a timeout, a DNS failure, a project that doesn't exist
-yet, a token without `project:read` — all of them print `warning: plan preflight skipped: ...`
-and the run continues. Billing fails closed; infrastructure fails open. An EvalShift outage
-must not break your CI, and the server still enforces every limit when the run is uploaded, so
-nothing escapes by skipping the preflight.
+**Everything else is fail-open.** A 5xx, a timeout, a DNS failure, a token without
+`project:read` — all of them print `warning: plan preflight skipped: ...` and the run continues.
+A project that does not exist on hosted EvalShift yet is handled separately and prints nothing:
+the preflight has nothing to check yet (the first `evalshift push` creates the project, and the
+server gates that upload on its own), so it silently lets the run through. Billing fails closed;
+infrastructure fails open. An EvalShift outage must not break your CI, and the server still
+enforces every limit when the run is uploaded, so nothing escapes by skipping the preflight.
 
 **The preflight is skipped entirely** when the config has no top-level `project:` key — there's
 nothing to resolve before the CLI builds the bundle.
@@ -906,9 +908,13 @@ was charged.
 ### `warning: plan preflight skipped: ...`
 
 The preflight couldn't get an answer, so the run continued — the intended behavior. Common
-causes: the project doesn't exist on hosted EvalShift yet (the first push creates it), the
-token lacks `project:read`, or hosted EvalShift is unreachable. The server still enforces plan
-limits when the run is uploaded, so this warning never means a limit was bypassed.
+causes: the token lacks `project:read`, or hosted EvalShift is unreachable (timeout, DNS
+failure, 5xx). The server still enforces plan limits when the run is uploaded, so this warning
+never means a limit was bypassed.
+
+This warning is not printed when the project simply doesn't exist on hosted EvalShift yet — that
+case is silent (the first push creates the project, and the server gates that upload on its
+own); see [Plan limits and the CI preflight](#plan-limits-and-the-ci-preflight).
 
 ### `warning: hosted policy check ...; falling back to fail-on: regression`
 
