@@ -474,8 +474,11 @@ was found on the base branch.* The policy sections still render.
 ### A commit status
 
 Context `evalshift/regression`, linking to the hosted diff (or the run, when there's no diff).
-This is what you add to branch protection to make EvalShift a required check. It's set on push
-events too, not just pull requests.
+For a single-suite workflow, this is what you add to branch protection to make EvalShift a
+required check. It's set on push events too, not just pull requests. If your workflow runs
+several suites in a matrix (as `evalshift init --ci` scaffolds), every suite's job sets this same
+context, so require the scaffold's `evalshift gate` join job instead — see
+[Make it a required check](#make-it-a-required-check).
 
 ---
 
@@ -749,8 +752,17 @@ The action doesn't upload artifacts. Add a step if you want the report retained 
 
 ### Make it a required check
 
-Branch protection → require status checks → add `evalshift/regression`. Do this only after the
-suite has been running at `fail-on: never` long enough that you trust it.
+Do this only after the suite has been running at `fail-on: never` long enough that you trust it.
+
+**Single-suite setup** (one `evalshift-action` step per job): branch protection → require status
+checks → add `evalshift/regression`, the commit status this action sets.
+
+**Multi-suite setup** (the matrix `evalshift init --ci` scaffolds, one `evalshift-action`
+invocation per suite): do **not** require `evalshift/regression` — every suite's job writes that
+same commit-status context, so the last suite to finish silently overwrites the others' results,
+and requiring it only ever reflects whichever suite finished last. Require the scaffold's join
+job instead, named `evalshift gate`; it depends on every suite job and fails if any of them
+failed. See the scaffolded workflow's own setup checklist for the same guidance.
 
 ### Post as a bot account
 
