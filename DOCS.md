@@ -108,17 +108,26 @@ jobs:
           fail-on: policy # the default; gates on your migration policy
 ```
 
-Keep the `push: branches: [main]` trigger. Pull requests need something to compare against, and
-that something is the most recent run on your base branch. Without trunk runs, every PR reports
-"no baseline" and passes unconditionally.
+Keep the `push: branches: [main]` trigger. The PR comment's diff table needs something to
+compare against — the most recent run on your base branch — and it's what the diff-based
+`fail-on` modes (`regression`, `any-slice-regression`) gate on. Without trunk runs, every PR
+reports "no baseline". Under the default `fail-on: policy` this by itself does **not** pass the
+check: the gate is your migration policy evaluated against the run's own source/target
+comparison, and it runs whether or not a baseline exists. See
+[Gating: the `fail-on` modes](#gating-the-fail-on-modes).
 
 The CLI's `evalshift init --ci` scaffolds a near-identical workflow for you.
 
 ### What you'll see on the first PR
 
-The check goes green and the comment says no compatible baseline was found. That's correct
-behavior, not a misconfiguration — there's no trunk run yet to diff against. Merge it, let the
-`push` trigger record a baseline on `main`, and the next PR gets a real comparison.
+The check goes green and the comment says no compatible baseline was found — expected, since
+there's no trunk run yet to diff against. It's also green for a second reason at this stage: you
+likely haven't added a `migration_policy` to `evalshift.yaml` yet, so hosted EvalShift reports
+the run as **ungated** rather than evaluating a policy (see
+[When no policy was pushed](#when-no-policy-was-pushed)). Once you add a policy, its verdict on
+that same first PR is decided independently of the baseline — the "no baseline" comment and the
+policy gate are two separate things. Merge it, let the `push` trigger record a baseline on
+`main`, and the next PR gets a real diff table alongside the policy verdict.
 
 ---
 
@@ -245,7 +254,7 @@ means a hung job.
 | `fail-on` | no | `policy` | Gating mode. See [below](#gating-the-fail-on-modes). |
 | `require-policy` | no | `false` | Whether a run pushed without a `migration_policy` fails the job. By default such a run merges, reported as ungated — a `::warning::` annotation and a commit status saying the gate is off. Read only under `fail-on: policy`. See [When no policy was pushed](#when-no-policy-was-pushed). |
 | `branch` | no | auto | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. |
-| `base-branch` | no | auto | Branch to look for a baseline run on. Auto-detected from the PR base ref, else the current ref. Resolving to empty means no baseline is fetched and the check always passes. |
+| `base-branch` | no | auto | Branch to look for a baseline run on. Auto-detected from the PR base ref, else the current ref. Resolving to empty means no baseline is fetched. That only passes the check under `fail-on: regression` / `any-slice-regression`; the default `fail-on: policy` still gates on the run's own policy check. |
 | `create-project` | no | `true` | Whether `evalshift push` may auto-create the hosted project when it doesn't exist. Set `false` to make a missing project a hard failure. |
 | `comment` | no | `true` | Whether to create or update the PR comment. Set `false` to keep the commit status but stay out of the conversation. |
 | `github-token` | no | `github.token` | Token used for the PR comment and the commit status. Override only to have a bot account post instead of `github-actions`. |
@@ -538,7 +547,10 @@ over time, and it's how baselines get recorded in the first place.
 
 Override `branch` / `base-branch` only when your branch naming genuinely differs from your git
 refs — for example if you push through a mirror that rewrites ref names. If `base-branch`
-resolves to an empty string, the action skips the baseline lookup entirely and always passes.
+resolves to an empty string, the action skips the baseline lookup entirely. That makes the
+diff-based `fail-on` modes (`regression`, `any-slice-regression`) pass, since there is nothing to
+compare against; it does not affect the default `fail-on: policy`, which asks the server for a
+policy verdict regardless of baseline.
 
 ---
 
@@ -908,9 +920,11 @@ In order of likelihood: nothing is gating at all because the run carried no `mig
 (the job log carries a `::warning::` saying so — see
 [When no policy was pushed](#when-no-policy-was-pushed)); under the default `fail-on: policy`,
 the policy is permissive enough that nothing has busted a budget yet (the comment shows the
-budget arithmetic — if every row passes with room to spare, tighten it in `evalshift.yaml`); no
-baseline run exists on the base branch yet (add the `push` trigger to `main` and merge once); `fail-on` is `never`; or
-`base-branch` resolved to an empty string.
+budget arithmetic — if every row passes with room to spare, tighten it in `evalshift.yaml`);
+`fail-on` is `never`; or you're on `fail-on: regression` / `any-slice-regression` and either no
+baseline run exists on the base branch yet (add the `push` trigger to `main` and merge once) or
+`base-branch` resolved to an empty string — neither of those two last causes affects the default
+`fail-on: policy`, which does not need a baseline to gate.
 
 ### Two EvalShift comments on one PR
 
