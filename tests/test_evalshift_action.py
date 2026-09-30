@@ -1948,3 +1948,14 @@ def test_set_status_warns_on_permission_error(capsys: pytest.CaptureFixture[str]
     )
 
     assert "warning: could not set commit status" in capsys.readouterr().err
+
+
+def test_provider_keys_are_redacted_including_deepseek() -> None:
+    # Keys reach the CLI through the job env untouched; the log redactor
+    # matches on the `_API_KEY` suffix, so a new provider needs no code change.
+    env = {
+        "ANTHROPIC_API_KEY": "sk-ant-secret",
+        "DEEPSEEK_API_KEY": "sk-deepseek-secret",
+        "HOME": "/home/runner",
+    }
+    assert sorted(action._secret_values(env)) == ["sk-ant-secret", "sk-deepseek-secret"]
