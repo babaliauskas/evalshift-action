@@ -1451,51 +1451,87 @@ DENIAL_BODY = json.dumps(
 ).encode("utf-8")
 
 
+PREFLIGHT_URL = "https://api.evalshift.test/runs/preflight"
+
+
 def _http_error(code: int, body: bytes | None = None) -> HTTPError:
     return HTTPError(
-        "https://api.evalshift.test/projects/p-1/ci-preflight",
+        PREFLIGHT_URL,
         code,
-        "Payment Required",
+        f"HTTP {code}",
         {},
         io.BytesIO(body) if body is not None else None,
     )
 
 
-def test_ci_preflight_posts_the_visibility_flag_and_parallelism() -> None:
-    requests: list[tuple[str, str, dict[str, str], bytes | None]] = []
+def _error_envelope(code: str, message: str) -> bytes:
+    """The hosted error envelope every non-2xx response carries (app/core/errors.py)."""
+    return json.dumps({"error": {"code": code, "message": message, "details": None}}).encode()
+
+
+RequestLog = list[tuple[str, str, dict[str, str], bytes | None]]
+
+
+def _preflight_client(outcome: Any) -> tuple[action.HostedClient, RequestLog]:
+    """A real ``HostedClient`` whose transport answers every request with ``outcome``.
+
+    ``outcome`` is either a response body to return or an exception to raise. Every request is
+    logged, so a test can assert on how many calls were made and to where -- the preflight is
+    one call, and a second one (a fallback, a project lookup) is exactly what must not happen.
+    """
+    requests: RequestLog = []
 
     def fake_request(
         method: str,
         url: str,
         headers: dict[str, str],
         data: bytes | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         requests.append((method, url, headers, data))
-        return {"allowed": True}
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
     client = action.HostedClient("https://api.evalshift.test", "es_secret", request=fake_request)
+    return client, requests
 
-    client.ci_preflight("p-1", repo_private=True)
 
+def test_the_preflight_is_one_post_to_runs_preflight_addressed_by_slug() -> None:
+    """One call, by slug, with the key the upload uses -- no project lookup in front of it.
+
+    The old flow listed `/orgs/{org}/projects` first, which needs `project:read`: the
+    documented CI key got 403 there, a project-pinned key got 404, and either way the check
+    that followed never ran.
+    """
+    client, requests = _preflight_client({"allowed": True})
+
+    result = action.run_preflight(
+        client,
+        project_ref=("acme", "checkout"),
+        repo_private=True,
+        create_project=False,
+    )
+
+    assert result is None
+    assert len(requests) == 1
     method, url, headers, data = requests[0]
     assert method == "POST"
-    assert url == "https://api.evalshift.test/projects/p-1/ci-preflight"
+    assert url == PREFLIGHT_URL
     assert headers["Authorization"] == "Bearer es_secret"
     assert data is not None
     assert json.loads(data) == {
+        "project_slug": "acme/checkout",
         "repo_private": True,
         "parallelism": action.PREFLIGHT_PARALLELISM,
     }
+    assert not any("/orgs/" in logged_url for _, logged_url, _, _ in requests)
 
 
 def test_ci_preflight_402_carries_the_servers_message_and_details() -> None:
-    def denied_request(*args: Any, **kwargs: Any) -> Any:
-        raise _http_error(402, DENIAL_BODY)
-
-    client = action.HostedClient("https://api.evalshift.test", "es_secret", request=denied_request)
+    client, _ = _preflight_client(_http_error(402, DENIAL_BODY))
 
     with pytest.raises(action.PreflightDenied) as excinfo:
-        client.ci_preflight("p-1", repo_private=True)
+        client.ci_preflight("acme/checkout", repo_private=True)
 
     denial = excinfo.value
     assert denial.message == "Private-repo CI is not included in the Free plan."
@@ -1503,17 +1539,162 @@ def test_ci_preflight_402_carries_the_servers_message_and_details() -> None:
     assert denial.details["tier"] == "free"
 
 
-def test_find_project_id_matches_the_project_slug() -> None:
-    def fake_request(*args: Any, **kwargs: Any) -> Any:
-        return [
-            {"id": "p-0", "slug": "other"},
-            {"id": "p-1", "slug": "checkout"},
-        ]
+def test_run_preflight_returns_the_denial_on_402() -> None:
+    client, _ = _preflight_client(_http_error(402, DENIAL_BODY))
 
-    client = action.HostedClient("https://api.evalshift.test", "es_secret", request=fake_request)
+    denial = action.run_preflight(
+        client, project_ref=("acme", "checkout"), repo_private=True, create_project=True
+    )
 
-    assert client.find_project_id("acme", "checkout") == "p-1"
-    assert client.find_project_id("acme", "missing") is None
+    assert denial is not None
+    assert denial.details["feature"] == "private_repo_ci"
+
+
+@pytest.mark.parametrize("create_project", [True, False])
+def test_run_preflight_stops_on_a_rejected_token(
+    create_project: bool,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A 401 will be a 401 at push time too -- after the whole suite has been paid for."""
+    client, _ = _preflight_client(
+        _http_error(401, _error_envelope("unauthorized", "Invalid API token"))
+    )
+
+    with pytest.raises(action.ActionError) as excinfo:
+        action.run_preflight(
+            client,
+            project_ref=("acme", "checkout"),
+            repo_private=False,
+            create_project=create_project,
+        )
+
+    message = str(excinfo.value)
+    assert "HTTP 401" in message
+    assert "Invalid API token" in message
+    assert "https://api.evalshift.test" in message
+    assert "service-account key" in message
+    assert "plan preflight skipped" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _error_envelope("forbidden", "Permission denied: run:create"),
+        None,
+    ],
+    ids=["server-names-the-permission", "no-body"],
+)
+def test_run_preflight_stops_on_a_key_without_run_create(body: bytes | None) -> None:
+    """The route's only permission is `run:create`, the same one `evalshift push` needs."""
+    client, _ = _preflight_client(_http_error(403, body))
+
+    with pytest.raises(action.ActionError) as excinfo:
+        action.run_preflight(
+            client, project_ref=("acme", "checkout"), repo_private=False, create_project=True
+        )
+
+    message = str(excinfo.value)
+    assert "HTTP 403" in message
+    assert "'run:create'" in message
+    assert "service-account key" in message
+
+
+def test_run_preflight_stops_on_a_missing_project_when_push_may_not_create_it() -> None:
+    """With `create-project: false` the push would fail on this same 404, after the suite."""
+    client, _ = _preflight_client(_http_error(404, _error_envelope("not_found", "Not found")))
+
+    with pytest.raises(action.ActionError) as excinfo:
+        action.run_preflight(
+            client, project_ref=("acme", "checkout"), repo_private=False, create_project=False
+        )
+
+    message = str(excinfo.value)
+    assert "HTTP 404" in message
+    assert "acme/checkout" in message
+    assert "create-project: false" in message
+
+
+def test_run_preflight_notices_and_continues_when_the_first_push_will_create_the_project(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client, requests = _preflight_client(_http_error(404))
+
+    result = action.run_preflight(
+        client, project_ref=("acme", "checkout"), repo_private=False, create_project=True
+    )
+
+    captured = capsys.readouterr()
+    assert result is None
+    assert len(requests) == 1
+    # A workflow command, so stdout -- GitHub only scrapes those off the step's stdout.
+    assert captured.out.startswith("::notice title=EvalShift preflight::")
+    assert "acme/checkout" in captured.out
+    assert "first push creates it" in captured.out
+    assert "\n" not in captured.out.rstrip("\n")
+
+
+def test_run_preflight_warns_and_continues_on_a_server_that_predates_the_route(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An older server answers 405 (`/runs/{run_id}` matches the path, not the method).
+
+    No fallback to the old two-call flow: it never worked with the documented key anyway.
+    """
+    client, requests = _preflight_client(
+        _http_error(405, _error_envelope("validation_error", "Method Not Allowed"))
+    )
+
+    result = action.run_preflight(
+        client, project_ref=("acme", "checkout"), repo_private=True, create_project=False
+    )
+
+    assert result is None
+    assert len(requests) == 1
+    assert "predates POST /runs/preflight" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("create_project", [True, False])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _http_error(500),
+        _http_error(502),
+        _http_error(503),
+        _http_error(422, _error_envelope("validation_error", "Request validation failed")),
+        _http_error(429),
+        URLError("connection refused"),
+        TimeoutError("timed out"),
+        ValueError("Expecting value: line 1 column 1 (char 0)"),
+    ],
+    ids=["500", "502", "503", "422", "429", "url-error", "timeout", "malformed-body"],
+)
+def test_run_preflight_never_blocks_on_an_infrastructure_failure(
+    failure: Exception,
+    create_project: bool,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fail-open on infrastructure: an EvalShift outage must not break every customer's CI."""
+    client, _ = _preflight_client(failure)
+
+    result = action.run_preflight(
+        client,
+        project_ref=("acme", "checkout"),
+        repo_private=True,
+        create_project=create_project,
+    )
+
+    assert result is None
+    assert "warning: plan preflight skipped:" in capsys.readouterr().err
+
+
+def test_run_preflight_is_skipped_without_a_project_ref() -> None:
+    client, requests = _preflight_client(AssertionError("no project ref, nothing to ask"))
+
+    assert (
+        action.run_preflight(client, project_ref=None, repo_private=True, create_project=True)
+        is None
+    )
+    assert requests == []
 
 
 def test_project_ref_from_config_reads_the_project_key(tmp_path: Path) -> None:
@@ -1533,73 +1714,6 @@ def test_project_ref_from_config_ignores_a_nested_project_key(tmp_path: Path) ->
 
 def test_project_ref_from_config_returns_none_when_the_file_is_missing(tmp_path: Path) -> None:
     assert action.project_ref_from_config(tmp_path / "nope.yaml") is None
-
-
-def test_run_preflight_returns_the_denial_on_402() -> None:
-    class DeniedClient:
-        def find_project_id(self, org_slug: str, project_slug: str) -> str:
-            return "p-1"
-
-        def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
-            raise action.PreflightDenied("nope", {"feature": "private_repo_ci"})
-
-    denial = action.run_preflight(
-        DeniedClient(), project_ref=("acme", "checkout"), repo_private=True
-    )
-
-    assert denial is not None
-    assert denial.message == "nope"
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [
-        _http_error(500),
-        _http_error(404),
-        _http_error(403),
-        URLError("connection refused"),
-    ],
-)
-def test_run_preflight_never_blocks_on_an_infrastructure_failure(
-    failure: Exception,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Fail-open on infrastructure: an EvalShift outage must not break every customer's CI."""
-
-    class BrokenClient:
-        def find_project_id(self, org_slug: str, project_slug: str) -> str:
-            return "p-1"
-
-        def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
-            raise failure
-
-    assert (
-        action.run_preflight(BrokenClient(), project_ref=("acme", "checkout"), repo_private=True)
-        is None
-    )
-    assert "preflight" in capsys.readouterr().err
-
-
-def test_run_preflight_is_skipped_when_the_project_is_not_hosted_yet() -> None:
-    class EmptyClient:
-        def find_project_id(self, org_slug: str, project_slug: str) -> None:
-            return None
-
-        def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
-            raise AssertionError("preflight must not run without a resolved project")
-
-    assert (
-        action.run_preflight(EmptyClient(), project_ref=("acme", "checkout"), repo_private=True)
-        is None
-    )
-
-
-def test_run_preflight_is_skipped_without_a_project_ref() -> None:
-    class UnusedClient:
-        def find_project_id(self, org_slug: str, project_slug: str) -> str:
-            raise AssertionError("no project ref means nothing to look up")
-
-    assert action.run_preflight(UnusedClient(), project_ref=None, repo_private=True) is None
 
 
 def test_preflight_body_names_the_plan_the_block_and_the_upgrade_url() -> None:
@@ -1651,42 +1765,67 @@ def test_error_annotation_is_a_single_line() -> None:
     assert "%0A" in annotation
 
 
-class FakePreflightHostedClient:
-    """Stands in for ``HostedClient`` in ``main`` — denies the preflight, records nothing else."""
+def _preflight_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    preflight: Any,
+    env: dict[str, str] | None = None,
+) -> tuple[int, RequestLog, list[bool]]:
+    """Run ``main`` against a real ``HostedClient`` whose preflight answers with ``preflight``.
 
-    denied: ClassVar[bool] = True
-    calls: ClassVar[list[tuple[str, bool]]] = []
+    Only the transport is faked, so the request the action really builds is what gets logged.
+    Every request after the preflight is the post-push baseline lookup and policy check, which
+    answer as if the run had no baseline and passed its policy.
+    """
+    _preflight_workspace(tmp_path)
+    requests: RequestLog = []
+    ran: list[bool] = []
 
-    def __init__(self, host: str, token: str) -> None:
-        self.host = host
-        self.token = token
-
-    def find_project_id(self, org_slug: str, project_slug: str) -> str:
-        return "p-1"
-
-    def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
-        type(self).calls.append((project_id, repo_private))
-        if type(self).denied:
-            raise action.PreflightDenied(
-                "Private-repo CI is not included in the Free plan.",
-                {
-                    "feature": "private_repo_ci",
-                    "tier": "free",
-                    "limit": None,
-                    "used": None,
-                    "resets_at": None,
-                    "upgrade_url": "https://app.evalshift.dev/app/acme/settings/billing",
-                },
-            )
-
-    def baseline_compatible(self, run_id: str, branch: str) -> dict[str, Any]:
+    def fake_request(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        data: bytes | None = None,
+    ) -> Any:
+        requests.append((method, url, headers, data))
+        if url.endswith("/runs/preflight"):
+            if isinstance(preflight, BaseException):
+                raise preflight
+            return preflight
+        if url.endswith("/policy-check"):
+            return _policy_payload("pass")
         return {}
 
-    def run_diff(self, api_diff_url: str) -> dict[str, Any]:
-        return {}
+    def fake_run(*args: Any, **kwargs: Any) -> action.EvalShiftRunResult:
+        ran.append(True)
+        return _fake_run_result()
 
-    def policy_check(self, run_id: str) -> dict[str, Any]:
-        return _policy_payload("pass")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(action, "http_request", fake_request)
+    monkeypatch.setattr(action, "run_evalshift_commands", fake_run)
+    for key in list(os.environ):
+        if key.startswith(("INPUT_", "GITHUB_")):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("INPUT_TOKEN", "es_secret")
+    monkeypatch.setenv("INPUT_HOST", "https://api.evalshift.test")
+    monkeypatch.setenv("INPUT_EVALSHIFT_VERSION", "1.2.3")
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
+    return action.main(), requests, ran
+
+
+def _outputs(path: Path) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in path.read_text("utf-8").splitlines())
+
+
+STOPPED_OUTPUTS = {
+    "run_url": "",
+    "diff_url": "",
+    "run_id": "",
+    "regression_count": "0",
+    "conclusion": "failure",
+}
 
 
 def _preflight_workspace(tmp_path: Path) -> None:
@@ -1698,63 +1837,138 @@ def test_a_denied_preflight_fails_the_job_without_running_the_suite(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _preflight_workspace(tmp_path)
     summary = tmp_path / "summary.md"
-    FakePreflightHostedClient.denied = True
-    FakePreflightHostedClient.calls = []
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(action, "HostedClient", FakePreflightHostedClient)
+    outputs = tmp_path / "outputs.txt"
 
-    def refuse_to_run(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("the suite must not run after a denied preflight")
-
-    monkeypatch.setattr(action, "run_evalshift_commands", refuse_to_run)
-    for key in list(os.environ):
-        if key.startswith(("INPUT_", "GITHUB_")):
-            monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("INPUT_TOKEN", "es_secret")
-    monkeypatch.setenv("INPUT_EVALSHIFT_VERSION", "1.2.3")
-    monkeypatch.setenv("INPUT_REPO_PRIVATE", "true")
-    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-
-    exit_code = action.main()
+    exit_code, requests, ran = _preflight_main(
+        monkeypatch,
+        tmp_path,
+        preflight=_http_error(402, DENIAL_BODY),
+        env={
+            "INPUT_REPO_PRIVATE": "true",
+            "GITHUB_STEP_SUMMARY": str(summary),
+            "GITHUB_OUTPUT": str(outputs),
+        },
+    )
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert FakePreflightHostedClient.calls == [("p-1", True)]
+    assert ran == []
+    assert [url for _, url, _, _ in requests] == [PREFLIGHT_URL]
+    assert json.loads(requests[0][3] or b"")["repo_private"] is True
     assert "::error title=EvalShift::" in captured.out
     assert "Private-repo CI is not included in the Free plan." in captured.out
     assert "https://app.evalshift.dev/app/acme/settings/billing" in summary.read_text("utf-8")
+    assert _outputs(outputs) == STOPPED_OUTPUTS
 
 
 def test_an_allowed_preflight_lets_the_suite_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    _preflight_workspace(tmp_path)
-    FakePreflightHostedClient.denied = False
-    FakePreflightHostedClient.calls = []
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(action, "HostedClient", FakePreflightHostedClient)
-    ran: list[bool] = []
-
-    def fake_run(*args: Any, **kwargs: Any) -> action.EvalShiftRunResult:
-        ran.append(True)
-        return _fake_run_result()
-
-    monkeypatch.setattr(action, "run_evalshift_commands", fake_run)
-    for key in list(os.environ):
-        if key.startswith(("INPUT_", "GITHUB_")):
-            monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("INPUT_TOKEN", "es_secret")
-    monkeypatch.setenv("INPUT_EVALSHIFT_VERSION", "1.2.3")
-    monkeypatch.setenv("INPUT_REPO_PRIVATE", "false")
-
-    exit_code = action.main()
+    exit_code, requests, ran = _preflight_main(
+        monkeypatch,
+        tmp_path,
+        preflight={"allowed": True},
+        env={"INPUT_REPO_PRIVATE": "false"},
+    )
 
     assert exit_code == 0
     assert ran == [True]
-    assert FakePreflightHostedClient.calls == [("p-1", False)]
+    assert requests[0][1] == PREFLIGHT_URL
+    assert json.loads(requests[0][3] or b"") == {
+        "project_slug": "acme/checkout",
+        "repo_private": False,
+        "parallelism": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("code", "body", "expected"),
+    [
+        (401, _error_envelope("unauthorized", "Invalid API token"), "HTTP 401"),
+        (403, _error_envelope("forbidden", "Permission denied: run:create"), "'run:create'"),
+    ],
+    ids=["401", "403"],
+)
+def test_a_preflight_the_token_cannot_pass_stops_the_job_before_the_suite(
+    code: int,
+    body: bytes,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The push would fail the same way -- after every model call in the suite was paid for."""
+    outputs = tmp_path / "outputs.txt"
+
+    exit_code, requests, ran = _preflight_main(
+        monkeypatch,
+        tmp_path,
+        preflight=_http_error(code, body),
+        env={"GITHUB_OUTPUT": str(outputs)},
+    )
+
+    assert exit_code == 1
+    assert ran == []
+    assert len(requests) == 1
+    assert expected in capsys.readouterr().err
+    assert _outputs(outputs) == STOPPED_OUTPUTS
+
+
+def test_a_missing_project_stops_the_job_when_create_project_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    outputs = tmp_path / "outputs.txt"
+
+    exit_code, _, ran = _preflight_main(
+        monkeypatch,
+        tmp_path,
+        preflight=_http_error(404),
+        env={"INPUT_CREATE_PROJECT": "false", "GITHUB_OUTPUT": str(outputs)},
+    )
+
+    assert exit_code == 1
+    assert ran == []
+    assert "acme/checkout" in capsys.readouterr().err
+    assert _outputs(outputs) == STOPPED_OUTPUTS
+
+
+def test_a_missing_project_is_a_notice_when_the_first_push_creates_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code, _, ran = _preflight_main(
+        monkeypatch,
+        tmp_path,
+        preflight=_http_error(404),
+        env={"INPUT_CREATE_PROJECT": "true"},
+    )
+
+    assert exit_code == 0
+    assert ran == [True]
+    assert "::notice title=EvalShift preflight::" in capsys.readouterr().out
+
+
+def test_an_older_server_lets_the_suite_run_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code, requests, ran = _preflight_main(
+        monkeypatch,
+        tmp_path,
+        preflight=_http_error(405),
+    )
+
+    assert exit_code == 0
+    assert ran == [True]
+    assert [url for _, url, _, _ in requests].count(PREFLIGHT_URL) == 1
+    assert not any("/orgs/" in url or "ci-preflight" in url for _, url, _, _ in requests)
+    assert "predates POST /runs/preflight" in capsys.readouterr().err
 
 
 def test_repo_private_input_defaults_to_the_github_context() -> None:
@@ -1762,7 +1976,7 @@ def test_repo_private_input_defaults_to_the_github_context() -> None:
 
 
 class FakePolicyHostedClient:
-    """Stands in for ``HostedClient`` in ``main``: no preflight, one policy decision."""
+    """Stands in for ``HostedClient`` in ``main``: an allowed preflight, one policy decision."""
 
     payload: ClassVar[dict[str, Any]] = {}
     failure: ClassVar[Exception | None] = None
@@ -1772,11 +1986,8 @@ class FakePolicyHostedClient:
         self.host = host
         self.token = token
 
-    def find_project_id(self, org_slug: str, project_slug: str) -> str | None:
+    def ci_preflight(self, project_slug: str, *, repo_private: bool) -> None:
         return None
-
-    def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
-        raise AssertionError("an unhosted project has nothing to preflight")
 
     def baseline_compatible(self, run_id: str, branch: str) -> dict[str, Any]:
         return {}
