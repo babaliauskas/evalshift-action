@@ -25,6 +25,27 @@ RETIRED_TERMS: tuple[str, ...] = (
     "thresholds:",
 )
 
+#: Exact substrings of claims that stopped being true when the plan preflight moved
+#: to `POST /runs/preflight`. The old preflight looked the project up through the org's
+#: project list, which needs `project:read`, then called a per-project route; the
+#: documented CI key could do neither, and the prose said that was fine. The default
+#: `fail-on: policy` gate reads `GET /runs/{id}/policy-check`, which needs
+#: `policy:read`, so "the gate needs no extra scope" left that gate silently falling
+#: back to regression mode.
+RETIRED_CLAIMS: tuple[str, ...] = (
+    "/orgs/<org>/projects",
+    "/orgs/{org}/projects",
+    # The old route. Not bare "ci-preflight": that is also the DOCS.md heading anchor
+    # `#plan-limits-and-the-ci-preflight`, which other sites link to.
+    "/ci-preflight",
+    "ci-preflight call",
+    "without `project:read`",
+    "lacks `project:read`",
+    "needs no extra scope",
+    "needs no scope beyond",
+    "needs no further scope",
+)
+
 PROSE_FILES: tuple[str, ...] = ("README.md", "DOCS.md", "llms-full.txt")
 
 
@@ -34,3 +55,28 @@ def test_prose_does_not_describe_a_removed_feature(name: str, term: str) -> None
     text = (REPO_ROOT / name).read_text(encoding="utf-8")
 
     assert term not in text, f"{name} still describes the removed {term!r}"
+
+
+@pytest.mark.parametrize("name", PROSE_FILES)
+@pytest.mark.parametrize("claim", RETIRED_CLAIMS)
+def test_prose_does_not_repeat_a_retired_claim(name: str, claim: str) -> None:
+    text = (REPO_ROOT / name).read_text(encoding="utf-8")
+
+    assert claim not in text, f"{name} still says {claim!r}, which is no longer true"
+
+
+#: What each prose file must still say, the other half of the tripwire: a doc that
+#: dropped the scope table or the preflight section entirely would pass every check
+#: above.
+REQUIRED_FACTS: tuple[str, ...] = (
+    "policy:read",
+    "POST /runs/preflight",
+)
+
+
+@pytest.mark.parametrize("name", PROSE_FILES)
+@pytest.mark.parametrize("fact", REQUIRED_FACTS)
+def test_prose_states_the_current_key_scopes_and_preflight(name: str, fact: str) -> None:
+    text = (REPO_ROOT / name).read_text(encoding="utf-8")
+
+    assert fact in text, f"{name} no longer mentions {fact!r}"

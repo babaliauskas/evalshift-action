@@ -98,13 +98,14 @@ up. A personal token is tied to one person's membership — when they leave, the
 membership goes, and your pipeline goes red with it. Do not use a personal token
 for CI.
 
-Give the key the least privilege that still works. The action needs exactly two
+Give the key the least privilege that still works. The action needs exactly three
 scopes, and the scope picker on that page speaks the same permission keys:
 
-| Scope        | What needs it |
-| ------------ | ------------- |
-| `run:create` | `evalshift push` — creating the hosted run and finalizing the upload. |
-| `run:read`   | The baseline lookup and the diff this action gates on. |
+| Scope         | What needs it |
+| ------------- | ------------- |
+| `run:create`  | `evalshift push` — creating the hosted run and finalizing the upload — and the [plan preflight](#plan-limits). |
+| `run:read`    | The baseline lookup and the diff the PR comment shows (and the diff-based `fail-on` modes gate on). |
+| `policy:read` | The policy verdict the default `fail-on: policy` gates on. |
 
 Set the service account's role to `member`; a `viewer` cannot upload a run.
 
@@ -115,13 +116,16 @@ One thing a correctly-scoped key deliberately cannot do:
   set `create-project: false`, so a wrong project slug fails as a missing project
   rather than looking like a credential problem.
 
-The gate itself needs no extra scope. Your `migration_policy` travels inside the
-run bundle that `run:create` already uploads, so a member-role key both pushes
-the policy and gates on it — see [`fail-on` modes](#fail-on-modes).
+Your `migration_policy` travels inside the run bundle that `run:create` already
+uploads; reading the verdict back is what needs `policy:read`. A key without it
+still pushes, but the default gate can't read its verdict and falls back to
+gating on the diff, with a warning — see [`fail-on` modes](#fail-on-modes). A
+member-role key holds all three.
 
 When the key is missing a permission, the action prints the exact permission key
-it was denied and how to fix it before exiting non-zero — you never have to guess
-which scope you forgot.
+it was denied and how to fix it — you never have to guess which scope you forgot.
+A missing `run:create` or `run:read` fails the job; a missing `policy:read` shows
+up as the policy-check fallback warning instead.
 
 ## Rotating the token
 
@@ -221,10 +225,10 @@ Any status outside those four is something a newer server grew that this pinned
 version of the action has never seen. It is handled like `inconclusive`: it does
 not fail the job, and it is never rendered as a pass.
 
-If the policy check itself is unreachable, 404s, or has no stored decision for
-the run, the action does not quietly go green. It falls back to `regression`
-gating for that run and says so in the log, the commit status and the PR
-comment.
+If the policy check itself is unreachable, refused (a key without
+`policy:read`), 404s, or has no stored decision for the run, the action does not
+quietly go green. It falls back to `regression` gating for that run and says so
+in the log, the commit status and the PR comment.
 
 When no compatible baseline run exists on the base branch, there is nothing to
 compare against: the diff-based modes pass, `regression_count` is `0`, and the
@@ -295,19 +299,26 @@ action carries any telemetry; besides the push, the only hosted call the action 
 ## Plan limits
 
 Some plan limits are cheaper to discover before the suite runs than halfway through it, so the
-action asks first: it reads `project: <org>/<project>` from your config, resolves that project,
-and calls `POST /projects/{id}/ci-preflight` with the repository's visibility.
+action asks first: it reads `project: <org>/<project>` from your config and makes one call,
+`POST /runs/preflight`, with that slug and the repository's visibility. It needs only
+`run:create`, the permission the push needs anyway.
 
 If the answer is a `402`, the job stops before any model credits are spent. You get an
 `::error::` annotation, a step summary, and — on a pull request — the usual EvalShift comment
 carrying the server's message, the plan you're on, what was blocked, and an upgrade link. The
-common cases are the monthly run quota and the parallelism cap; private-repo CI is included
-on every plan, the free one included.
+usual cause is the monthly run quota; an unpaid subscription or more members than the plan's
+seats also stop it. Private-repo CI is included on every plan, the free one included.
 
-Anything else — EvalShift being down, a project that doesn't exist yet, a token that can't list
-projects — is treated as an infrastructure problem: the action logs a warning and runs anyway.
-A billing check that breaks everyone's CI when the billing service is down is worse than one
-that occasionally lets a run through, and the server still enforces limits on the upload.
+The job also stops before the suite when the push would fail anyway: a token the server
+rejects (`401`), a key without `run:create` (`403`), or a project that doesn't exist while
+`create-project: false` (`404`). Each is reported like a `402` — an `::error::` annotation
+carrying the fix, and a step summary. With `create-project: true` a missing project is a notice
+instead, because the first push creates it.
+
+Anything else — EvalShift being down, a server too old to have the endpoint — is treated as an
+infrastructure problem: the action logs a warning and runs anyway. A billing check that breaks
+everyone's CI when the billing service is down is worse than one that occasionally lets a run
+through, and the server still enforces every limit on the upload.
 
 `repo-private` comes from the GitHub context and is *reported* to EvalShift, not verified by
 it. The server records the first `true` permanently, so a project that has ever reported

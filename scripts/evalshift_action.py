@@ -8,6 +8,7 @@ action outputs, and updates GitHub PR affordances.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -119,9 +120,16 @@ MAX_SLICE_ROWS = 5
 # in-flight runs itself, so declaring anything larger here would be a guess.
 PREFLIGHT_PARALLELISM = 1
 
+# The plan preflight: one call, addressed by project slug and authorized by `run:create`, the
+# permission `evalshift push` already needs. A server older than the route answers 405 --
+# `/runs/{run_id}` matches the path but not the method -- which the action reads as "cannot
+# ask" and runs anyway. There is deliberately no fallback to the old project-id route: it sat
+# behind `GET /orgs/{org}/projects`, which the documented CI key cannot read.
+PREFLIGHT_PATH = "/runs/preflight"
+
 # `project: org/project` at the top level of evalshift.yaml. Read with a regex rather than a
 # YAML parser because the action ships with no dependencies, and the CLI constrains the key to
-# exactly this shape. Anything this misses costs only the preflight, which is fail-open.
+# exactly this shape. Anything this misses only skips the preflight; the upload is still gated.
 PROJECT_KEY_PATTERN = re.compile(
     r"""^project:\s*["']?([a-z0-9-]+)/([a-z0-9-]+)["']?\s*(?:\#.*)?$"""
 )
@@ -134,6 +142,11 @@ KEY_ADVICE = (
     "(EvalShift web app -> Settings -> API tokens -> Service accounts), store it as an "
     "encrypted repository or environment secret, and point the action's 'token' input at it. "
     "A personal token is not a CI credential -- it dies with the person who created it."
+)
+# `POST /runs/preflight` requires exactly one permission, so a 403 there means this one even
+# when the body does not say so (a proxy's 403, say).
+PREFLIGHT_PERMISSION_HINT = (
+    f"The EvalShift token is missing the 'run:create' permission. {KEY_ADVICE}"
 )
 
 RequestFn = Callable[[str, str, dict[str, str], bytes | None], Any]
@@ -329,39 +342,25 @@ class HostedClient:
             raise ActionError("hosted policy-check response was not an object")
         return data
 
-    def find_project_id(self, org_slug: str, project_slug: str) -> str | None:
-        """The hosted id of ``org_slug/project_slug``, or ``None`` when it does not exist yet."""
-        data = self._request(
-            "GET",
-            self._url(f"/orgs/{quote(org_slug)}/projects"),
-            self._headers(),
-            None,
-        )
-        if not isinstance(data, list):
-            return None
-        for item in data:
-            if not isinstance(item, dict) or item.get("slug") != project_slug:
-                continue
-            project_id = item.get("id")
-            return str(project_id) if project_id else None
-        return None
-
-    def ci_preflight(self, project_id: str, *, repo_private: bool) -> None:
+    def ci_preflight(self, project_slug: str, *, repo_private: bool) -> None:
         """Ask whether this job may run at all, before the suite spends anyone's money.
 
-        Raises ``PreflightDenied`` on the server's 402. Every other failure is left to the
-        caller, which treats it as an infrastructure problem and lets the run continue.
+        One ``POST /runs/preflight``, addressed by the same ``org/project`` slug ``POST /runs``
+        takes and authorized by the same ``run:create`` -- so the key that can push can always
+        ask, and a key pinned to one project needs no org-wide listing first.
+
+        Raises ``PreflightDenied`` on the server's 402. Every other ``HTTPError`` propagates
+        unread, because what it means depends on inputs only ``run_preflight`` holds.
         """
         payload = json.dumps(
-            {"repo_private": repo_private, "parallelism": PREFLIGHT_PARALLELISM}
+            {
+                "project_slug": project_slug,
+                "repo_private": repo_private,
+                "parallelism": PREFLIGHT_PARALLELISM,
+            }
         ).encode("utf-8")
         try:
-            self._request(
-                "POST",
-                self._url(f"/projects/{quote(project_id)}/ci-preflight"),
-                self._headers(),
-                payload,
-            )
+            self._request("POST", self._url(PREFLIGHT_PATH), self._headers(), payload)
         except HTTPError as exc:
             if exc.code != 402:
                 raise
@@ -729,30 +728,94 @@ def run_preflight(
     *,
     project_ref: tuple[str, str] | None,
     repo_private: bool,
+    create_project: bool,
 ) -> PreflightDenied | None:
     """Ask hosted EvalShift whether this job may run, before the suite costs anything.
 
-    Fail-closed on billing, fail-open on infrastructure: a 402 comes back as a denial the
-    caller must act on, while an outage, an unknown project, or a token that cannot list
-    projects only prints a warning. A billing check that breaks every customer's CI when the
-    billing service is down is worse than one that occasionally lets a run through.
+    The question is asked with the same slug and the same key the push will use, so each
+    answer that the push would repeat -- after every model call in the suite has been paid
+    for -- stops the job here instead:
+
+    - 402: the plan does not cover this run. Returned as a denial for the caller to render.
+    - 401: the token is not accepted at all. Raises ``ActionError``.
+    - 403: the key lacks ``run:create``. Raises ``ActionError`` naming the permission.
+    - 404 with ``create_project`` off: the push is forbidden to create the project, so it
+      would 404 too. Raises ``ActionError``. With ``create_project`` on, the first push
+      creates the project, so this is a ``::notice::`` and the run continues.
+
+    Everything else fails open: a 405 from a server that predates the route, a 5xx, a 422, a
+    timeout, a malformed body. A billing check that breaks every customer's CI when the
+    billing service is down is worse than one that occasionally lets a run through, and the
+    server enforces every limit again at upload.
     """
     if project_ref is None:
         return None
-    org_slug, project_slug = project_ref
+    project_slug = "/".join(project_ref)
     try:
-        project_id = hosted.find_project_id(org_slug, project_slug)
-        if project_id is None:
-            # Nothing to check yet: the project is created by the first `evalshift push`,
-            # and the server gates that upload on its own.
-            return None
-        hosted.ci_preflight(project_id, repo_private=repo_private)
+        hosted.ci_preflight(project_slug, repo_private=repo_private)
     except PreflightDenied as denial:
         return denial
-    # OSError covers HTTPError and URLError; ActionError covers a wrapped 403.
-    except (OSError, ValueError, ActionError) as exc:
+    except HTTPError as exc:
+        _preflight_http_error(exc, project_slug=project_slug, create_project=create_project)
+    # OSError covers URLError and a socket timeout; ValueError a malformed response body;
+    # http.client.HTTPException a garbled status line or a body cut short (IncompleteRead).
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         print(f"warning: plan preflight skipped: {exc}", file=sys.stderr)
     return None
+
+
+def _preflight_http_error(exc: HTTPError, *, project_slug: str, create_project: bool) -> None:
+    """Act on a non-402 preflight failure: raise for the ones the push would repeat, else warn."""
+    host = _origin(exc.url)
+    if exc.code == 401:
+        detail = error_body_message(exc)
+        suffix = f": {detail}" if detail else ""
+        raise ActionError(
+            f"hosted EvalShift at {host} rejected the token (HTTP 401){suffix}\n"
+            "The 'token' input is not a live EvalShift key for this host: it is mistyped, "
+            "revoked, past its rotation grace window, or was minted on a different 'host'. "
+            f"{KEY_ADVICE}"
+        ) from exc
+    if exc.code == 403:
+        detail = error_body_message(exc)
+        suffix = f": {detail}" if detail else ""
+        hint = missing_permission_hint(detail) or PREFLIGHT_PERMISSION_HINT
+        raise ActionError(
+            f"hosted EvalShift refused the plan preflight (HTTP 403){suffix}\n{hint}"
+        ) from exc
+    if exc.code == 404:
+        if not create_project:
+            raise ActionError(
+                f"hosted EvalShift has no project '{project_slug}' this token can reach "
+                "(HTTP 404), and create-project: false forbids the push to create it. Check "
+                "the `project:` key in the EvalShift config, create the project in the web "
+                "app, or use a key that is not pinned to a different project."
+            ) from exc
+        print(
+            workflow_command(
+                "notice",
+                "EvalShift preflight",
+                f"project '{project_slug}' is not on hosted EvalShift yet, or this token "
+                "cannot see it (HTTP 404); the first push creates it, and plan limits are "
+                "checked when the run is uploaded",
+            )
+        )
+        return
+    if exc.code == 405:
+        print(
+            f"warning: plan preflight skipped: hosted EvalShift at {host} predates "
+            "POST /runs/preflight (HTTP 405); plan limits are still enforced when the run "
+            "is uploaded",
+            file=sys.stderr,
+        )
+        return
+    print(f"warning: plan preflight skipped: {exc}", file=sys.stderr)
+
+
+def _origin(url: str | None) -> str:
+    """``scheme://host`` of ``url`` -- enough to say which server answered, nothing more."""
+    parts = urlsplit(url or "")
+    return f"{parts.scheme}://{parts.netloc}" if parts.netloc else "the configured host"
 
 
 def build_preflight_body(denial: PreflightDenied) -> str:
@@ -780,10 +843,30 @@ def build_preflight_body(denial: PreflightDenied) -> str:
     return "\n".join(lines)
 
 
+def _escape_data(value: str) -> str:
+    """A workflow command's message: one line, so line breaks escape. ``%`` goes first."""
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _escape_property(value: str) -> str:
+    """A workflow command's property value, which also ends at ``:`` (the message) or ``,``."""
+    return _escape_data(value).replace(":", "%3A").replace(",", "%2C")
+
+
+def workflow_command(kind: str, title: str, message: str) -> str:
+    """A GitHub ``::<kind> title=...::`` command, escaped the way the runner unescapes it."""
+    return f"::{kind} title={_escape_property(title)}::{_escape_data(message)}"
+
+
+def build_preflight_stop_body(message: str) -> str:
+    """A preflight stop (401, 403, 404) as markdown for the step summary."""
+    # One paragraph per line: markdown would run adjacent lines together.
+    return "\n\n".join(["## EvalShift did not run", *message.splitlines()])
+
+
 def error_annotation(message: str) -> str:
-    """A GitHub ``::error::`` command. Workflow commands are one line, so newlines escape."""
-    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    return f"::error title=EvalShift::{escaped}"
+    """A GitHub ``::error::`` command for the job's own failure."""
+    return workflow_command("error", "EvalShift", message)
 
 
 def write_step_summary(body: str, env: Mapping[str, str] | None = None) -> None:
@@ -1294,6 +1377,16 @@ def write_outputs(outputs: dict[str, Any], env: dict[str, str] | None = None) ->
             fh.write(f"{key}={value}\n")
 
 
+# What a job that never ran the suite reports: nothing was pushed, and it failed.
+STOPPED_OUTPUTS: dict[str, Any] = {
+    "run_url": "",
+    "diff_url": "",
+    "run_id": "",
+    "regression_count": 0,
+    "conclusion": "failure",
+}
+
+
 def main() -> int:
     try:
         config = ActionConfig.from_env()
@@ -1301,22 +1394,25 @@ def main() -> int:
         mask_secret(config.github_token)
         context = detect_context(os.environ, config.branch, config.base_branch)
         hosted = HostedClient(config.host, config.token)
-        denial = run_preflight(
-            hosted,
-            project_ref=project_ref_from_config(Path(config.config)),
-            repo_private=config.repo_private,
-        )
+        try:
+            denial = run_preflight(
+                hosted,
+                project_ref=project_ref_from_config(Path(config.config)),
+                repo_private=config.repo_private,
+                create_project=config.create_project,
+            )
+        except ActionError as exc:
+            # Stopped before the suite, reported the way a denial is: an annotation, a step
+            # summary, and the same outputs, so a workflow reading `conclusion` sees a failure
+            # rather than an empty string. Returned, not re-raised: the outer handler would
+            # print the same text a second time.
+            print(error_annotation(str(exc)))
+            write_step_summary(build_preflight_stop_body(str(exc)))
+            write_outputs(STOPPED_OUTPUTS)
+            return 1
         if denial is not None:
             report_preflight_denial(denial, config, context)
-            write_outputs(
-                {
-                    "run_url": "",
-                    "diff_url": "",
-                    "run_id": "",
-                    "regression_count": 0,
-                    "conclusion": "failure",
-                }
-            )
+            write_outputs(STOPPED_OUTPUTS)
             return 1
         run = run_evalshift_commands(config, cwd=Path.cwd())
         baseline_payload = (
