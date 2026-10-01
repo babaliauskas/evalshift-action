@@ -108,17 +108,31 @@ jobs:
           fail-on: policy # the default; gates on your migration policy
 ```
 
-Keep the `push: branches: [main]` trigger. Pull requests need something to compare against, and
-that something is the most recent run on your base branch. Without trunk runs, every PR reports
-"no baseline" and passes unconditionally.
+Keep the `push: branches: [main]` trigger. The PR comment's diff table needs something to
+compare against — the most recent run on your base branch — and it's what the diff-based
+`fail-on` modes (`regression`, `any-slice-regression`) gate on. Without trunk runs, every PR
+reports "no baseline". Under the default `fail-on: policy` this by itself does **not** pass the
+check: the gate is your migration policy evaluated against the run's own source/target
+comparison, and it runs whether or not a baseline exists. See
+[Gating: the `fail-on` modes](#gating-the-fail-on-modes).
 
 The CLI's `evalshift init --ci` scaffolds a near-identical workflow for you.
 
 ### What you'll see on the first PR
 
-The check goes green and the comment says no compatible baseline was found. That's correct
-behavior, not a misconfiguration — there's no trunk run yet to diff against. Merge it, let the
-`push` trigger record a baseline on `main`, and the next PR gets a real comparison.
+The comment says no compatible baseline run was found — expected, since there's no trunk run yet
+to diff against; that's a `regression`-mode diff observation, not a misconfiguration. It says
+nothing about whether the job passes.
+
+Under the default `fail-on: policy`, this same first PR is gated by the run's own policy
+verdict, independent of the baseline: `evalshift init` always writes a `migration_policy` block
+into `evalshift.yaml` (every migration profile has one), so a project scaffolded the way these
+docs recommend carries a policy from its very first run, and hosted EvalShift evaluates it — the
+job passes only if that verdict does. A run is reported as **ungated** only when the config
+carries no `migration_policy` at all — see
+[When no policy was pushed](#when-no-policy-was-pushed) — which isn't the case here unless you
+deleted the block `init` wrote. Merge the first PR, let the `push` trigger record a baseline on
+`main`, and the next PR additionally gets a real diff table alongside the policy verdict.
 
 ---
 
@@ -245,7 +259,7 @@ means a hung job.
 | `fail-on` | no | `policy` | Gating mode. See [below](#gating-the-fail-on-modes). |
 | `require-policy` | no | `false` | Whether a run pushed without a `migration_policy` fails the job. By default such a run merges, reported as ungated — a `::warning::` annotation and a commit status saying the gate is off. Read only under `fail-on: policy`. See [When no policy was pushed](#when-no-policy-was-pushed). |
 | `branch` | no | auto | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. |
-| `base-branch` | no | auto | Branch to look for a baseline run on. Auto-detected from the PR base ref, else the current ref. Resolving to empty means no baseline is fetched and the check always passes. |
+| `base-branch` | no | auto | Branch to look for a baseline run on. Auto-detected from the PR base ref, else the current ref. Resolving to empty means no baseline is fetched. That only passes the check under `fail-on: regression` / `any-slice-regression`; the default `fail-on: policy` still gates on the run's own policy check. |
 | `create-project` | no | `true` | Whether `evalshift push` may auto-create the hosted project when it doesn't exist. Set `false` to make a missing project a hard failure. |
 | `comment` | no | `true` | Whether to create or update the PR comment. Set `false` to keep the commit status but stay out of the conversation. |
 | `github-token` | no | `github.token` | Token used for the PR comment and the commit status. Override only to have a bot account post instead of `github-actions`. |
@@ -465,8 +479,11 @@ was found on the base branch.* The policy sections still render.
 ### A commit status
 
 Context `evalshift/regression`, linking to the hosted diff (or the run, when there's no diff).
-This is what you add to branch protection to make EvalShift a required check. It's set on push
-events too, not just pull requests.
+For a single-suite workflow, this is what you add to branch protection to make EvalShift a
+required check. It's set on push events too, not just pull requests. If your workflow runs
+several suites in a matrix (as `evalshift init --ci` scaffolds), every suite's job sets this same
+context, so require the scaffold's `evalshift gate` join job instead — see
+[Make it a required check](#make-it-a-required-check).
 
 ---
 
@@ -538,7 +555,10 @@ over time, and it's how baselines get recorded in the first place.
 
 Override `branch` / `base-branch` only when your branch naming genuinely differs from your git
 refs — for example if you push through a mirror that rewrites ref names. If `base-branch`
-resolves to an empty string, the action skips the baseline lookup entirely and always passes.
+resolves to an empty string, the action skips the baseline lookup entirely. That makes the
+diff-based `fail-on` modes (`regression`, `any-slice-regression`) pass, since there is nothing to
+compare against; it does not affect the default `fail-on: policy`, which asks the server for a
+policy verdict regardless of baseline.
 
 ---
 
@@ -604,11 +624,13 @@ Every word of it comes from the server. The action never decides what a plan cov
 and a client that guesses at entitlements is a client that tells people the wrong thing after
 the next pricing change.
 
-**Everything else is fail-open.** A 5xx, a timeout, a DNS failure, a project that doesn't exist
-yet, a token without `project:read` — all of them print `warning: plan preflight skipped: ...`
-and the run continues. Billing fails closed; infrastructure fails open. An EvalShift outage
-must not break your CI, and the server still enforces every limit when the run is uploaded, so
-nothing escapes by skipping the preflight.
+**Everything else is fail-open.** A 5xx, a timeout, a DNS failure, a token without
+`project:read` — all of them print `warning: plan preflight skipped: ...` and the run continues.
+A project that does not exist on hosted EvalShift yet is handled separately and prints nothing:
+the preflight has nothing to check yet (the first `evalshift push` creates the project, and the
+server gates that upload on its own), so it silently lets the run through. Billing fails closed;
+infrastructure fails open. An EvalShift outage must not break your CI, and the server still
+enforces every limit when the run is uploaded, so nothing escapes by skipping the preflight.
 
 **The preflight is skipped entirely** when the config has no top-level `project:` key — there's
 nothing to resolve before the CLI builds the bundle.
@@ -737,8 +759,17 @@ The action doesn't upload artifacts. Add a step if you want the report retained 
 
 ### Make it a required check
 
-Branch protection → require status checks → add `evalshift/regression`. Do this only after the
-suite has been running at `fail-on: never` long enough that you trust it.
+Do this only after the suite has been running at `fail-on: never` long enough that you trust it.
+
+**Single-suite setup** (one `evalshift-action` step per job): branch protection → require status
+checks → add `evalshift/regression`, the commit status this action sets.
+
+**Multi-suite setup** (the matrix `evalshift init --ci` scaffolds, one `evalshift-action`
+invocation per suite): do **not** require `evalshift/regression` — every suite's job writes that
+same commit-status context, so the last suite to finish silently overwrites the others' results,
+and requiring it only ever reflects whichever suite finished last. Require the scaffold's join
+job instead, named `evalshift gate`; it depends on every suite job and fails if any of them
+failed. See the scaffolded workflow's own setup checklist for the same guidance.
 
 ### Post as a bot account
 
@@ -882,9 +913,13 @@ was charged.
 ### `warning: plan preflight skipped: ...`
 
 The preflight couldn't get an answer, so the run continued — the intended behavior. Common
-causes: the project doesn't exist on hosted EvalShift yet (the first push creates it), the
-token lacks `project:read`, or hosted EvalShift is unreachable. The server still enforces plan
-limits when the run is uploaded, so this warning never means a limit was bypassed.
+causes: the token lacks `project:read`, or hosted EvalShift is unreachable (timeout, DNS
+failure, 5xx). The server still enforces plan limits when the run is uploaded, so this warning
+never means a limit was bypassed.
+
+This warning is not printed when the project simply doesn't exist on hosted EvalShift yet — that
+case is silent (the first push creates the project, and the server gates that upload on its
+own); see [Plan limits and the CI preflight](#plan-limits-and-the-ci-preflight).
 
 ### `warning: hosted policy check ...; falling back to fail-on: regression`
 
@@ -908,9 +943,11 @@ In order of likelihood: nothing is gating at all because the run carried no `mig
 (the job log carries a `::warning::` saying so — see
 [When no policy was pushed](#when-no-policy-was-pushed)); under the default `fail-on: policy`,
 the policy is permissive enough that nothing has busted a budget yet (the comment shows the
-budget arithmetic — if every row passes with room to spare, tighten it in `evalshift.yaml`); no
-baseline run exists on the base branch yet (add the `push` trigger to `main` and merge once); `fail-on` is `never`; or
-`base-branch` resolved to an empty string.
+budget arithmetic — if every row passes with room to spare, tighten it in `evalshift.yaml`);
+`fail-on` is `never`; or you're on `fail-on: regression` / `any-slice-regression` and either no
+baseline run exists on the base branch yet (add the `push` trigger to `main` and merge once) or
+`base-branch` resolved to an empty string — neither of those two last causes affects the default
+`fail-on: policy`, which does not need a baseline to gate.
 
 ### Two EvalShift comments on one PR
 
