@@ -178,15 +178,16 @@ personal token is tied to one membership; when that membership goes, every pipel
 goes red. Do not use a personal token for CI.
 
 The scope picker on that page speaks EvalShift's permission keys directly. The action needs
-exactly two:
+exactly three:
 
 | Scope | What needs it |
 | ----- | ------------- |
-| `run:create` | `evalshift push` — creating the hosted run and finalizing the upload. |
-| `run:read` | `GET /runs/{id}/baseline-compatible` and the diff this action gates on. |
+| `run:create` | `evalshift push` — creating the hosted run and finalizing the upload — and the [plan preflight](#plan-limits-and-the-ci-preflight), `POST /runs/preflight`. |
+| `run:read` | `GET /runs/{id}/baseline-compatible` and the diff the PR comment shows (and the diff-based `fail-on` modes gate on). |
+| `policy:read` | `GET /runs/{id}/policy-check`, the verdict the default `fail-on: policy` gates on. |
 
-Give the service account the `member` role. A `viewer` holds `run:read` but not `run:create`,
-so it can look but never upload.
+Give the service account the `member` role; it holds all three. A `viewer` holds `run:read`
+and `policy:read` but not `run:create`, so it can look but never upload.
 
 One consequence of a correctly-scoped key, by design:
 
@@ -195,12 +196,14 @@ One consequence of a correctly-scoped key, by design:
   `create-project: false` so a wrong project slug reads as a missing project rather than as a
   credential problem.
 
-The gate needs no scope beyond these two. The `migration_policy` block rides inside the run
-bundle `run:create` already uploads, so a member-role key both pushes the policy and gates on
-it.
+The `migration_policy` block rides inside the run bundle `run:create` already uploads; reading
+the verdict back is what needs `policy:read`. Leave it off and the push still succeeds, but the
+default gate cannot read its verdict: it falls back to `fail-on: regression` for that run, with
+a warning naming the missing permission. It does not fail the job, so the gap is easy to miss.
 
 A denial is self-diagnosing: the action prints the exact permission key the hosted API refused,
-plus how to mint a key that holds it, before exiting non-zero.
+plus how to mint a key that holds it — as the job's error for `run:create` and `run:read`, and
+in the fallback warning for `policy:read`, which degrades the gate rather than failing the job.
 
 ### Rotating it
 
@@ -388,9 +391,10 @@ upgrading the action must not turn a repository red overnight. Set `require-poli
 you want an ungated PR to be a failing check instead; it governs this case only, never a verdict
 the policy did reach and never the unavailable-check fallback below.
 
-**When the policy check is unavailable.** If it errors, 404s, or has no stored decision for the
-run, the action falls back to `regression` gating for that run and announces it in the job log,
-the commit-status description, and the PR comment. It does not silently go green — but for that
+**When the policy check is unavailable.** If it errors, is refused (a key without
+`policy:read`), 404s, or has no stored decision for the run, the action falls back to
+`regression` gating for that run and announces it in the job log, the commit-status
+description, and the PR comment. It does not silently go green — but for that
 run the gate is the diff, not your policy.
 
 ### The diff-only modes
@@ -506,8 +510,10 @@ the action logs a warning and carries on rather than failing the run — the gat
 1. **Install.** `actions/setup-python` at `python-version`, then `pip install
    evalshift==<evalshift-version>`. No pip caching, so budget roughly 20–60 seconds.
 2. **Preflight.** Asks hosted EvalShift whether this job is covered by the org's plan, before
-   a single model call. A `402` stops the job here; anything else lets it continue. See
-   [Plan limits and the CI preflight](#plan-limits-and-the-ci-preflight).
+   a single model call. A `402` stops the job here, and so do the answers the push would repeat
+   after the suite had been paid for: a rejected token (`401`), a key without `run:create`
+   (`403`), and a missing project under `create-project: false` (`404`). Anything else lets it
+   continue. See [Plan limits and the CI preflight](#plan-limits-and-the-ci-preflight).
 3. **Run.** `evalshift all --yes --config <config>` plus the suite selection
    (`--suite-name <name>`, or `--suite <path>`) in the workspace root.
    This is the full local pipeline: doctor → run → evaluate → analyze → report. Artifacts land
@@ -606,11 +612,21 @@ an org may have in flight at once. (Private-repo CI is included on every plan; t
 still reports the repository's visibility.) Discovering one of those halfway through a
 suite means paying for the model calls and getting nothing, so the action asks first.
 
-**What it does, before installing anything of yours or spending a credit:**
+**What it does, before running your suite or spending a credit:**
 
 1. Reads `project: <org>/<project>` from your config file — the same key `evalshift push` uses.
-2. Resolves that project through `GET /orgs/<org>/projects`.
-3. Calls `POST /projects/<id>/ci-preflight` with `{"repo_private": <bool>, "parallelism": 1}`.
+2. Makes one call, `POST /runs/preflight`, with
+   `{"project_slug": "<org>/<project>", "repo_private": <bool>, "parallelism": 1}`.
+
+That call is addressed by the same slug the upload uses and needs only `run:create`, the
+permission the upload needs anyway — so a key that can push can always ask, including a key
+pinned to that one project.
+
+**What the server checks** is every limit that would still refuse the upload once the suite has
+run: the org's subscription is paid up, the org is within its seats, the monthly run quota has
+a run left, the plan covers CI on a repository of this visibility, and one job fits under the
+parallelism cap. How many runs are in flight right now is not checked here — that changes by
+the second — and is enforced when the run is uploaded.
 
 **A 402 fails the job immediately.** You get, in three places:
 
@@ -624,16 +640,28 @@ Every word of it comes from the server. The action never decides what a plan cov
 and a client that guesses at entitlements is a client that tells people the wrong thing after
 the next pricing change.
 
-**Everything else is fail-open.** A 5xx, a timeout, a DNS failure, a token without
-`project:read` — all of them print `warning: plan preflight skipped: ...` and the run continues.
-A project that does not exist on hosted EvalShift yet is handled separately and prints nothing:
-the preflight has nothing to check yet (the first `evalshift push` creates the project, and the
-server gates that upload on its own), so it silently lets the run through. Billing fails closed;
-infrastructure fails open. An EvalShift outage must not break your CI, and the server still
-enforces every limit when the run is uploaded, so nothing escapes by skipping the preflight.
+**Answers the push would repeat stop the job too**, reported like a `402`: an `::error::`
+annotation carrying the fix, a step summary, and the same `conclusion: failure` outputs:
+
+| Answer | Why the job stops |
+| ------ | ----------------- |
+| `401` | The server doesn't accept the token: mistyped, revoked, past its rotation grace window, or minted for a different `host`. |
+| `403` | The key lacks `run:create`. The error names the permission and how to mint a key that holds it. |
+| `404` with `create-project: false` | No project with that slug that this key can reach — it doesn't exist, the slug is wrong, or the key is pinned to a different project — and the push is not allowed to create one. |
+
+**A missing project with `create-project: true` is a notice, not a stop.** The first push
+creates the project, so the action prints a `::notice::` saying so and runs. The server gates
+that upload like any other.
+
+**Everything else is fail-open.** A 5xx, a `422`, a timeout, a DNS failure, a malformed
+response — all of them print `warning: plan preflight skipped: ...` and the run continues. So
+does a `405` from a hosted server that predates `POST /runs/preflight`; that warning says so.
+Billing fails closed; infrastructure fails open. An EvalShift outage must not break your CI,
+and the server still enforces every limit when the run is uploaded, so nothing escapes by
+skipping the preflight.
 
 **The preflight is skipped entirely** when the config has no top-level `project:` key — there's
-nothing to resolve before the CLI builds the bundle.
+no slug to ask about before the CLI builds the bundle.
 
 ### About `repo-private`
 
@@ -802,8 +830,9 @@ human user will create a new comment on every run instead of updating one.
   with `pull_request_target` means running untrusted code with your secrets in scope — don't,
   unless you fully understand the exposure.
 - **The hosted key is a scoped machine credential.** Mint it from a service account with only
-  `run:create` and `run:read`, store it as an encrypted secret, and rotate it through the
-  overlapping-key flow. Details and rationale: [The EvalShift token](#the-evalshift-token).
+  `run:create`, `run:read` and `policy:read`, store it as an encrypted secret, and rotate it
+  through the overlapping-key flow. Details and rationale:
+  [The EvalShift token](#the-evalshift-token).
 - **Dependencies.** The runtime helper is stdlib-only. `pip-audit` runs in this repo's own CI.
 
 ---
@@ -846,7 +875,9 @@ Worth knowing before you rely on this in anger:
   and the preflight is skipped rather than guessed at. The server still enforces the limit at
   upload time.
 - **A denied preflight fails the job at `fail-on: never` too.** `fail-on` governs regressions;
-  a plan that doesn't cover the run is a different question, and the run never happens.
+  a plan that doesn't cover the run is a different question, and the run never happens. The
+  same goes for a preflight stopped by a `401`, a `403`, or a `404` under
+  `create-project: false`.
 
 ---
 
@@ -885,13 +916,19 @@ log and pin a newer `evalshift-version`.
 
 Bad, revoked, or expired `EVALSHIFT_TOKEN`, or the wrong `host`. Verify with `evalshift whoami`
 locally using the same token. A key past its rotation grace window authenticates as nobody.
+The [preflight](#plan-limits-and-the-ci-preflight) asks with the same token before the suite
+runs, so this usually shows up there, as `hosted EvalShift at <host> rejected the token (HTTP
+401)`, before any model credits are spent.
 
 ### `The EvalShift token is missing the '<key>' permission`
 
 The key authenticated fine but its scopes (or its service account's role) don't cover what the
 step needed. Widen the scope on the existing key, or mint one that holds it — see
-[Least privilege](#least-privilege-a-service-account-key-not-a-personal-token). The two the
-action always needs are `run:create` and `run:read`.
+[Least privilege](#least-privilege-a-service-account-key-not-a-personal-token). The three the
+action needs are `run:create`, `run:read` and `policy:read`. A missing `run:create` stops the
+job at the preflight, before the suite runs (when the config names its `project:`). A missing
+`policy:read` does not stop anything: it surfaces as the `falling back to fail-on: regression`
+warning below.
 
 ### `cannot auto-create project: this token must have owner access to the org`
 
@@ -907,27 +944,34 @@ gating still works — only the comment is lost.
 
 The [CI preflight](#plan-limits-and-the-ci-preflight) got a `402`: the org's plan doesn't cover
 this run. The annotation and the step summary name the limit and link to the billing page. The
-usual causes are the monthly run quota and the parallelism cap. Nothing was run and nothing
-was charged.
+usual cause is the monthly run quota; an unpaid subscription or more members than the plan's
+seats are the others. Nothing was run and nothing was charged.
+
+### `hosted EvalShift has no project '<org>/<project>' this token can reach (HTTP 404)`
+
+The preflight found no project with the slug in your config's `project:` key, and
+`create-project: false` forbids the push to create one, so the job stopped before the suite.
+Either the slug is wrong, the project hasn't been created in the web app yet, or the key is
+pinned to a different project. With `create-project: true` the same answer is a `::notice::`
+and the run continues, because the first push creates the project.
 
 ### `warning: plan preflight skipped: ...`
 
 The preflight couldn't get an answer, so the run continued — the intended behavior. Common
-causes: the token lacks `project:read`, or hosted EvalShift is unreachable (timeout, DNS
-failure, 5xx). The server still enforces plan limits when the run is uploaded, so this warning
-never means a limit was bypassed.
-
-This warning is not printed when the project simply doesn't exist on hosted EvalShift yet — that
-case is silent (the first push creates the project, and the server gates that upload on its
-own); see [Plan limits and the CI preflight](#plan-limits-and-the-ci-preflight).
+causes: hosted EvalShift is unreachable (timeout, DNS failure, 5xx), or it answered with
+something the preflight doesn't act on. If the warning says the server `predates POST
+/runs/preflight`, the hosted server is older than this action; nothing is wrong on your side.
+The server still enforces plan limits when the run is uploaded, so this warning never means a
+limit was bypassed.
 
 ### `warning: hosted policy check ...; falling back to fail-on: regression`
 
 Under `fail-on: policy` the action could not get a verdict for this run — the endpoint errored,
-answered `404`, or holds no stored decision for the run. The job still gated, but on the diff
-rather than on your policy, and the PR comment carries the same warning. This is about reading
-the verdict, not about having a policy: a run pushed without one gets an answer, and that answer
-is the annotation below.
+refused the key (`HTTP 403` naming `policy:read`: add that scope to the key), answered `404`, or
+holds no stored decision for the run. The job still gated, but on the diff rather than on your
+policy, and the PR comment carries the same warning. This is about reading the verdict, not
+about having a policy: a run pushed without one gets an answer, and that answer is the
+annotation below.
 
 ### `::warning::no migration policy was pushed with this run`
 
