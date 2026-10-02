@@ -154,7 +154,7 @@ jobs:
           Bumps the pinned EvalShift CLI from \`${CURRENT}\` to \`${TARGET}\` in every site
           (\`action.yml\`, README, DOCS.md, llms-full.txt) and bumps the action's patch version.
 
-          CLI changes: https://github.com/babaliauskas/EvalShift/blob/main/CHANGELOG.md
+          CLI changes: https://github.com/evalshift/evalshift-cli/blob/main/CHANGELOG.md
 
           Pre-validation (run before this PR was opened, by \`.github/workflows/bump-cli-pin.yml\`):
 
