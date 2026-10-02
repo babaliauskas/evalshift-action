@@ -5,7 +5,7 @@ request it runs the suite against both models, pushes the result to hosted EvalS
 it to the latest run on your base branch, and fails the check when your migration policy says
 the candidate is not safe to ship.
 
-- **Action ref:** `babaliauskas/evalshift-action@v0` · **version:** 0.6.0 · **License:** MIT
+- **Action ref:** `evalshift/evalshift-action@v0` · **version:** 0.6.0 · **License:** MIT
 - **Kind:** composite action — installs Python + the pinned EvalShift CLI, then runs a small
   stdlib-only helper script. Nothing is compiled, nothing is containerised.
 - **Pinned CLI:** `evalshift==1.2.0` by default, overridable.
@@ -102,7 +102,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v7
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           fail-on: policy # the default; gates on your migration policy
@@ -161,7 +161,7 @@ jobs:
     environment: ci          # the environment that holds EVALSHIFT_TOKEN
     steps:
       - uses: actions/checkout@v7
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
 ```
@@ -285,7 +285,7 @@ Boolean inputs accept `1`, `true`, `yes`, `on` (case-insensitive). Anything else
 Consume them from a later step:
 
 ```yaml
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         id: evalshift
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
@@ -697,7 +697,7 @@ suites:
 ```
 
 ```yaml
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           suite-name: planner
@@ -725,7 +725,7 @@ usage error.
 ### Config in a subdirectory
 
 ```yaml
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           config: eval/evalshift.yaml
@@ -753,7 +753,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           suite: eval/golden-text.jsonl
@@ -762,7 +762,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           config: eval/agent.yaml

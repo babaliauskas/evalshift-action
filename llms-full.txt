@@ -1,7 +1,7 @@
 # evalshift-action (GitHub Action) — complete reference for AI tools
 
 Canonical hosted copy: https://www.evalshift.dev/ci-llms-full.txt
-Repo/action ref: babaliauskas/evalshift-action | version: 0.6.0 | license: MIT
+Repo/action ref: evalshift/evalshift-action | version: 0.6.0 | license: MIT
 Kind: composite GitHub Action (not JavaScript, not Docker)
 Marketplace name: "EvalShift" | branding: bar-chart-2 / purple
 Runtime helper: scripts/evalshift_action.py (stdlib only, no third-party deps)
@@ -34,7 +34,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v7
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           fail-on: policy   # the default
@@ -672,7 +672,7 @@ slices:
 
 Config in a subdirectory:
 ```yaml
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           config: eval/evalshift.yaml
@@ -681,7 +681,7 @@ Config in a subdirectory:
 
 Consume outputs downstream:
 ```yaml
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         id: evalshift
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
@@ -698,7 +698,7 @@ Report only, never block (calibration phase):
 Multiple suites in one repo — give each its own job and disable the comment on all but one, or
 the constant marker and constant status context make them overwrite each other:
 ```yaml
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           suite: eval/golden-agent.jsonl

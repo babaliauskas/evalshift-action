@@ -46,7 +46,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v7
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           fail-on: policy # the default; gates on your migration policy
@@ -80,7 +80,7 @@ jobs:
     environment: ci          # the environment that holds EVALSHIFT_TOKEN
     steps:
       - uses: actions/checkout@v7
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
 ```
@@ -247,7 +247,7 @@ PR comment says so explicitly. `policy` still asks the server for a verdict.
 Consume them from a later step:
 
 ```yaml
-      - uses: babaliauskas/evalshift-action@v0
+      - uses: evalshift/evalshift-action@v0
         id: evalshift
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
