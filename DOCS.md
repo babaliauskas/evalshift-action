@@ -5,10 +5,10 @@ request it runs the suite against both models, pushes the result to hosted EvalS
 it to the latest run on your base branch, and fails the check when your migration policy says
 the candidate is not safe to ship.
 
-- **Action ref:** `evalshift/evalshift-action@v0` · **version:** 0.6.0 · **License:** MIT
+- **Action ref:** `evalshift/evalshift-action@v0` · **version:** 0.6.1 · **License:** MIT
 - **Kind:** composite action — installs Python + the pinned EvalShift CLI, then runs a small
   stdlib-only helper script. Nothing is compiled, nothing is containerised.
-- **Pinned CLI:** `evalshift==1.2.0` by default, overridable.
+- **Pinned CLI:** `evalshift==1.2.1` by default, overridable.
 - **What it adds on top of the CLI:** hosted push, baseline lookup, cross-branch diff, the
   governed policy verdict, one self-updating PR comment, a commit status, and an exit code.
 
@@ -257,8 +257,8 @@ means a hung job.
 | `config` | no | `evalshift.yaml` | Path to your config, relative to the repository root. Paths *inside* the config (prompt files, tools) resolve relative to the config file's own directory, so a config in a subdirectory works. |
 | `suite` | no | `golden.jsonl` | Path to the golden JSONL suite, relative to the repository root. Selects a *file* and nothing else — see [Selecting a suite](#selecting-a-suite-name-vs-path). Mutually exclusive with `suite-name`. |
 | `suite-name` | no | — | Name of a suite wired under `suites:` in `evalshift.yaml`. Prefer this over `suite`. Needs `evalshift-version` >= `0.14.0`. See [Selecting a suite](#selecting-a-suite-name-vs-path). |
-| `evalshift-version` | no | `1.2.0` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
-| `python-version` | no | `3.12` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.11 for 1.2.0). |
+| `evalshift-version` | no | `1.2.1` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
+| `python-version` | no | `3.12` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.11 for 1.2.1). |
 | `fail-on` | no | `policy` | Gating mode. See [below](#gating-the-fail-on-modes). |
 | `require-policy` | no | `false` | Whether a run pushed without a `migration_policy` fails the job. By default such a run merges, reported as ungated — a `::warning::` annotation and a commit status saying the gate is off. Read only under `fail-on: policy`. See [When no policy was pushed](#when-no-policy-was-pushed). |
 | `branch` | no | auto | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. |
@@ -1003,9 +1003,9 @@ the comments API on a long thread.
 It doesn't — output is buffered per command and printed when each finishes. A slow suite is
 silent while it runs.
 
-### `pip install evalshift==1.2.0` fails
+### `pip install evalshift==1.2.1` fails
 
-`python-version` is below the CLI's minimum. EvalShift 1.2.0 needs Python 3.11+.
+`python-version` is below the CLI's minimum. EvalShift 1.2.1 needs Python 3.11+.
 
 ### Costs are higher than expected
 
@@ -1016,7 +1016,7 @@ CI suite, or swap LLM-judge evaluators for structural ones in a CI-specific conf
 
 ## Versioning and stability
 
-Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.6.0` for a fully
+Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.6.1` for a fully
 reproducible workflow. The `evalshift-version` input pins the CLI separately — pin both if you
 want a workflow that behaves identically six months from now.
 
