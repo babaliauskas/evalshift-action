@@ -37,6 +37,10 @@ jobs:
       NO_COLOR: "1"
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The last step authenticates its own push. Keeping no token in
+          # .git/config also keeps it away from the pip installs and pytest.
+          persist-credentials: false
 
       - name: Resolve current pin and target version
         id: resolve
@@ -169,15 +173,41 @@ jobs:
 
       - name: Open or update the bump PR
         if: steps.resolve.outputs.skip != 'true'
-        uses: peter-evans/create-pull-request@v7
-        with:
+        # Plain git + gh rather than peter-evans/create-pull-request: v7 of
+        # that action pushed with no credentials after actions/checkout@v7
+        # (peter-evans/create-pull-request#4271).
+        env:
           # A PR opened with GITHUB_TOKEN does not trigger ci.yml. Set the
-          # optional BUMP_PR_TOKEN fine-grained PAT (contents + pull-requests
-          # write on this repo) so the normal CI runs on the PR; without it the
-          # PR still opens, pre-validated by the steps above.
-          token: ${{ secrets.BUMP_PR_TOKEN || github.token }}
-          branch: bump/evalshift-${{ steps.resolve.outputs.target }}
-          delete-branch: true
-          commit-message: "chore(pin): evalshift ${{ steps.resolve.outputs.current }} → ${{ steps.resolve.outputs.target }}"
-          title: "chore(pin): evalshift ${{ steps.resolve.outputs.current }} → ${{ steps.resolve.outputs.target }}"
-          body-path: ${{ runner.temp }}/pr-body.md
+          # optional BUMP_PR_TOKEN fine-grained PAT (owned by the evalshift
+          # org; contents + pull-requests write on this repo) so the normal CI
+          # runs on the PR. Without it, the fallback needs the org/repo setting
+          # "Allow GitHub Actions to create and approve pull requests".
+          GH_TOKEN: ${{ secrets.BUMP_PR_TOKEN || github.token }}
+          BASE: ${{ github.event.repository.default_branch }}
+          BRANCH: bump/evalshift-${{ steps.resolve.outputs.target }}
+          TITLE: "chore(pin): evalshift ${{ steps.resolve.outputs.current }} → ${{ steps.resolve.outputs.target }}"
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          # The bump script only rewrites tracked files.
+          git add -u
+          git commit -m "$TITLE"
+
+          # Re-push only when the content changed, so a bump PR left open
+          # does not get a fresh commit (and a CI run) every day.
+          if git fetch --quiet --depth=1 origin "refs/heads/$BRANCH" 2>/dev/null \
+              && git diff --quiet FETCH_HEAD HEAD; then
+            echo "origin/$BRANCH already has this content; not pushing"
+          else
+            git push --force origin "HEAD:refs/heads/$BRANCH"
+          fi
+
+          pr="$(gh pr list --head "$BRANCH" --base "$BASE" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "$TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
+          else
+            gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
+          fi

@@ -377,7 +377,8 @@ Optional secret `BUMP_PR_TOKEN`: a PR opened with the default `GITHUB_TOKEN`
 does not trigger `ci.yml`. Store a fine-grained PAT with `contents` and
 `pull-requests` write on this repo under that name and the normal CI runs on
 the bump PR; without it the workflow falls back to `GITHUB_TOKEN` and the PR
-still opens, relying on the pre-validation above.
+still opens, relying on the pre-validation above, provided the repository allows
+GitHub Actions to create pull requests.
 
 ### Releases
 
