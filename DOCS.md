@@ -1039,7 +1039,8 @@ runs the bump script and the test suite; only then does it open a PR on branch
 `bump/evalshift-<version>` titled `chore(pin): evalshift <old> → <new>`. The optional
 `BUMP_PR_TOKEN` secret (a fine-grained PAT with `contents` and `pull-requests` write) lets the
 normal CI run on that PR — a PR opened with `GITHUB_TOKEN` does not trigger `ci.yml`; without the
-secret the PR still opens, pre-validated.
+secret the PR still opens, pre-validated, provided the repository allows GitHub Actions to
+create pull requests.
 
 Merging a PR that bumps `version` in `pyproject.toml` *is* the release — there are no manual
 tags. On every push to `main`, `.github/workflows/release.yml` creates `v<version>` on the merge

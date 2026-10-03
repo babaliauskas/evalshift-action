@@ -623,9 +623,9 @@ the env var covers any other prompt a CLI release adds.
   `python-version` default (fails with `::error::` on mismatch — a human must raise
   `python-version`), `pip install` the target + `scripts/cli_contract.sh`, then
   `bump_cli_pin.py` + `uv run pytest`. Opens/updates the PR on branch `bump/evalshift-<version>`
-  titled `chore(pin): evalshift <old> → <new>` with `peter-evans/create-pull-request`. Uses the
+  titled `chore(pin): evalshift <old> → <new>` with plain `git` + `gh`. Uses the
   optional `BUMP_PR_TOKEN` secret (fine-grained PAT, `contents` + `pull-requests` write) so
-  `ci.yml` runs on the PR; falls back to `GITHUB_TOKEN` (PR still opens, CI does not trigger).
+  `ci.yml` runs on the PR; falls back to `GITHUB_TOKEN` (PR still opens if the repo lets Actions create PRs; CI does not trigger).
 - `.github/workflows/release.yml`: on every push to `main`, reads `version` from
   `pyproject.toml`; refuses a major other than 0; stops green when tag `v<version>` exists;
   otherwise creates annotated `v<version>` on the merge commit, force-moves `v0` to it (only `v0`
